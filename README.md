@@ -11,12 +11,21 @@ python app.py
 
 The API will be available at `http://localhost:8000`.
 
+Swagger UI will be available at `http://localhost:8000/apidocs/`.
+
 ## Endpoints
 
 | Method | Path      | Description          |
 |--------|-----------|----------------------|
 | GET    | `/`       | Welcome message      |
 | GET    | `/health` | Health check         |
+
+## API Docs
+
+Interactive Swagger docs:
+
+- `GET /apidocs/` (Swagger UI)
+- `GET /apispec_1.json` (OpenAPI JSON)
 
 ## Docker
 
