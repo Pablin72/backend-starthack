@@ -13,6 +13,19 @@ The API will be available at `http://localhost:8000`.
 
 Swagger UI will be available at `http://localhost:8000/apidocs/`.
 
+## Project Structure
+
+```text
+backend-starthack/
+├── app.py
+├── api/
+│   ├── __init__.py          # Flask application factory (create_app)
+│   └── controllers/
+│       └── foundry_controller.py
+├── requirements.txt
+└── Dockerfile
+```
+
 ## Endpoints
 
 | Method | Path      | Description          |
