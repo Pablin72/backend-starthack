@@ -1,3 +1,4 @@
+import logging
 import os
 
 from dotenv import load_dotenv
@@ -9,6 +10,8 @@ from api.controllers.foundry_controller import foundry_bp
 
 def create_app() -> Flask:
     load_dotenv()
+    logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s %(message)s")
+    logger = logging.getLogger("backend-starthack")
 
     app = Flask(__name__)
 
@@ -37,8 +40,14 @@ def create_app() -> Flask:
     }
 
     Swagger(app, config=swagger_config, template=swagger_template)
-
     app.register_blueprint(foundry_bp, url_prefix="/api/foundry")
+
+    logger.info(
+      "Config startup | AZURE_FOUNDRY_ENDPOINT=%s | AZURE_FOUNDRY_MODEL=%s | AZURE_FOUNDRY_KEY_SET=%s",
+        os.environ.get("AZURE_FOUNDRY_ENDPOINT", ""),
+        os.environ.get("AZURE_FOUNDRY_MODEL", ""),
+        bool(os.environ.get("AZURE_FOUNDRY_KEY")),
+    )
 
     @app.route("/", methods=["GET"])
     def index():

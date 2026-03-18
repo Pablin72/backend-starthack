@@ -32,6 +32,20 @@ backend-starthack/
 |--------|-----------|----------------------|
 | GET    | `/`       | Welcome message      |
 | GET    | `/health` | Health check         |
+| POST   | `/api/foundry/test-llm` | Prueba de modelo LLM (requiere token estático) |
+
+## Auth Flow (Frontend -> Backend)
+
+El endpoint `/api/foundry/test-llm` valida un token estático quemado en código.
+
+Envía uno de estos headers:
+
+- `X-API-Token: starthack_front_2026_allow`
+- `Authorization: Bearer starthack_front_2026_allow`
+
+Variables de entorno necesarias para auth:
+
+- Ninguna adicional (solo token estático en header)
 
 ## API Docs
 
