@@ -2,6 +2,13 @@ import os
 
 from flask import Flask, jsonify
 from flasgger import Swagger
+from dotenv import load_dotenv
+
+# Cargar variables de entorno desde .env si existe
+load_dotenv()
+
+# Importar Blueprints
+from controllers.foundry_controller import foundry_bp
 
 app = Flask(__name__)
 
@@ -31,6 +38,8 @@ swagger_template = {
 
 Swagger(app, config=swagger_config, template=swagger_template)
 
+# Registrar Blueprints
+app.register_blueprint(foundry_bp, url_prefix="/api/foundry")
 
 @app.route("/", methods=["GET"])
 def index():

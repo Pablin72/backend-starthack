@@ -50,6 +50,9 @@ The GitHub Actions workflow in `.github/workflows/deploy.yml` automatically buil
 | `AZURE_REGISTRY_PASSWORD`     | ACR password                                        |
 | `AZURE_RESOURCE_GROUP`        | Azure resource group containing the Container App   |
 | `AZURE_CONTAINER_APP_NAME`    | Name of the Azure Container App                     |
+| `AZURE_FOUNDRY_ENDPOINT`      | Azure AI Foundry endpoint URL                       |
+| `AZURE_FOUNDRY_KEY`           | Azure AI Foundry API key                            |
+| `AZURE_FOUNDRY_MODEL`         | Azure AI Foundry deployed model name                |
 
 ### Creating the Azure service principal
 
