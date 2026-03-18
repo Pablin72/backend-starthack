@@ -1,11 +1,11 @@
 import os
 from flask import Blueprint, request, jsonify
 
-# Importar el SDK de Azure Foundry
 from azure.ai.inference import ChatCompletionsClient
 from azure.core.credentials import AzureKeyCredential
 
-foundry_bp = Blueprint('foundry', __name__)
+foundry_bp = Blueprint("foundry", __name__)
+
 
 @foundry_bp.route("/test-llm", methods=["POST"])
 def test_llm():
@@ -57,26 +57,26 @@ def test_llm():
     try:
         client = ChatCompletionsClient(
             endpoint=endpoint,
-            credential=AzureKeyCredential(key)
+            credential=AzureKeyCredential(key),
         )
-        
+
         response = client.complete(
             messages=[
                 {"role": "system", "content": "Eres un asistente de IA útil para un hackathon."},
-                {"role": "user", "content": prompt}
+                {"role": "user", "content": prompt},
             ],
-            model=model_name
+            model=model_name,
         )
-        
+
         llm_reply = response.choices[0].message.content
 
         return jsonify({
             "status": "success",
             "model": model_name,
-            "response": llm_reply
+            "response": llm_reply,
         })
     except Exception as e:
         return jsonify({
             "status": "error",
-            "message": str(e)
+            "message": str(e),
         }), 500
