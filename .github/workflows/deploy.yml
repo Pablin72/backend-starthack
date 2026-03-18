@@ -55,3 +55,20 @@ jobs:
           resourceGroup: ${{ secrets.AZURE_RESOURCE_GROUP }}
           containerAppName: ${{ secrets.AZURE_CONTAINER_APP_NAME }}
           imageToDeploy: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ github.sha }}
+
+      - name: Set Azure Foundry secret in Container App
+        run: |
+          az containerapp secret set \
+            --name "${{ secrets.AZURE_CONTAINER_APP_NAME }}" \
+            --resource-group "${{ secrets.AZURE_RESOURCE_GROUP }}" \
+            --secrets azure-foundry-key="${{ secrets.AZURE_FOUNDRY_KEY }}"
+
+      - name: Set Azure Foundry environment variables in Container App
+        run: |
+          az containerapp update \
+            --name "${{ secrets.AZURE_CONTAINER_APP_NAME }}" \
+            --resource-group "${{ secrets.AZURE_RESOURCE_GROUP }}" \
+            --set-env-vars \
+              AZURE_FOUNDRY_ENDPOINT="${{ secrets.AZURE_FOUNDRY_ENDPOINT }}" \
+              AZURE_FOUNDRY_MODEL="${{ secrets.AZURE_FOUNDRY_MODEL }}" \
+              AZURE_FOUNDRY_KEY=secretref:azure-foundry-key
