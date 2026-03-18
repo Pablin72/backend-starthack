@@ -16,27 +16,36 @@ def create_app() -> Flask:
     app = Flask(__name__)
 
     swagger_config = {
-        "headers": [],
-        "specs": [
-            {
-                "endpoint": "apispec_1",
-                "route": "/apispec_1.json",
-                "rule_filter": lambda rule: True,
-                "model_filter": lambda tag: True,
-            }
-        ],
-        "static_url_path": "/flasgger_static",
-        "swagger_ui": True,
-        "specs_route": "/apidocs/",
+      "headers": [],
+      "specs": [
+        {
+          "endpoint": "apispec_1",
+          "route": "/apispec_1.json",
+          "rule_filter": lambda rule: True,
+          "model_filter": lambda tag: True,
+        }
+      ],
+      "static_url_path": "/flasgger_static",
+      "swagger_ui": True,
+      "specs_route": "/apidocs/",
     }
 
     swagger_template = {
-        "swagger": "2.0",
-        "info": {
-            "title": "Backend StartHack API",
-            "description": "API de backend con documentación Swagger",
-            "version": "1.0.0",
-        },
+      "swagger": "2.0",
+      "info": {
+        "title": "Backend StartHack API",
+        "description": "API de backend con documentación Swagger",
+        "version": "1.0.0",
+      },
+      "securityDefinitions": {
+        "Bearer": {
+          "type": "apiKey",
+          "name": "Authorization",
+          "in": "header",
+          "description": "Pon aquí: Bearer starthack_front_2026_allow"
+        }
+      },
+      "security": [{"Bearer": []}],
     }
 
     Swagger(app, config=swagger_config, template=swagger_template)
