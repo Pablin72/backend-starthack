@@ -45,7 +45,50 @@ def telegram_webhook():
         return jsonify({"error": "No token"}), 500
 
     # Si es un simple mensaje de texto o comando, por ahora respondemos un OK.
-    # En este webhook solo nos interesa el callback_query.
+    if "message" in update and "text" in update["message"]:
+        message = update["message"]
+        chat_id = message.get("chat", {}).get("id")
+        text = message.get("text", "")
+
+        if text.startswith("/set_position"):
+            try:
+                # Extraer el valor del comando, e.g. "/set_position 50"
+                parts = text.split(maxsplit=1)
+                if len(parts) < 2:
+                    _send_message(token, chat_id, "⚠️ Invalid format. Usage: `/set_position <value>` (e.g., `/set_position 50.0`)")
+                    return jsonify({"status": "ok"}), 200
+
+                value = float(parts[1])
+                
+                # Validar rango (asumiendo 0 a 100)
+                if not (0.0 <= value <= 100.0):
+                    _send_message(token, chat_id, "⚠️ Value must be between 0.0 and 100.0")
+                    return jsonify({"status": "ok"}), 200
+
+                mqtt_host = os.getenv("MQTT_HOST", "test.mosquitto.org")
+                mqtt_port = int(os.getenv("MQTT_PORT", "1883"))
+                device_id = os.getenv("BELIMO_DEVICE_ID", "actuator-01")
+                
+                client = mqtt.Client(mqtt.CallbackAPIVersion.VERSION2)
+                client.connect(mqtt_host, mqtt_port, 60)
+                topic = f"belimo/{device_id}/commands"
+                payload = json.dumps({"action": "set_setpoint", "value": value})
+                
+                client.publish(topic, payload)
+                client.disconnect()
+
+                _send_message(token, chat_id, f"✅ Actuator setpoint commanded to **{value}%**.")
+
+            except ValueError:
+                _send_message(token, chat_id, "⚠️ Please provide a valid numeric value.")
+            except Exception as e:
+                logger.error(f"Failed to process /set_position: {e}")
+                _send_message(token, chat_id, f"❌ Failed to reach MQTT broker or execute command.")
+                
+        # Respondemos 200 a otros mensajes de texto
+        return jsonify({"status": "ok"}), 200
+
+    # En este webhook solo nos interesa el callback_query (botones).
     if "callback_query" in update:
         query = update["callback_query"]
         callback_id = query.get("id")
@@ -115,6 +158,18 @@ def _edit_message(token, chat_id, message_id, text, reply_markup=None):
         "chat_id": chat_id,
         "message_id": message_id,
         "text": text,
+    }
+    if reply_markup:
+        payload["reply_markup"] = reply_markup
+
+    _send_telegram_request(url, payload)
+
+def _send_message(token, chat_id, text, reply_markup=None):
+    url = f"https://api.telegram.org/bot{token}/sendMessage"
+    payload = {
+        "chat_id": chat_id,
+        "text": text,
+        "parse_mode": "Markdown"
     }
     if reply_markup:
         payload["reply_markup"] = reply_markup
