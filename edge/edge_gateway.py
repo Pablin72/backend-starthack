@@ -116,6 +116,9 @@ THRESH_POWER    = float(os.getenv("POWER_ANOMALY_THRESHOLD_PCT",     "15.0"))
 THRESH_POSITION = float(os.getenv("POSITION_ANOMALY_THRESHOLD_PCT",  "20.0"))
 TEMP_DELTA_PERSISTENCE = int(os.getenv("TEMP_DELTA_PERSISTENCE", "3"))
 
+if not INFLUX_TOKEN.strip():
+    logger.warning("INFLUX_TOKEN is empty. Check edge/.env.edge; InfluxDB queries will fail with 401.")
+
 # ── InfluxDB field names ───────────────────────────────────────────────────────
 INFLUX_FIELDS = [
     "feedback_position_%",
