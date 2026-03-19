@@ -55,6 +55,63 @@ The script queries the `measurements` measurement from the Belimo InfluxDB, pivo
 - `rotation_direction`
 - `test_number`
 
+## Drive The Actuator Without The Streamlit UI
+
+To send deterministic command sequences directly into `_process`, use:
+
+```bash
+python scripts/run_belimo_test.py --suite characterize --test-number 301
+```
+
+This built-in `characterize` suite runs:
+
+- constant holds at 20, 50, and 80
+- a reset hold
+- a soft sine sweep
+- a triangle sweep
+- a square-wave stress phase
+- a safe finish hold at 50
+
+To run one specific waveform instead:
+
+```bash
+python scripts/run_belimo_test.py \
+  --suite single \
+  --test-number 302 \
+  --waveform sine \
+  --bias 50 \
+  --amplitude 20 \
+  --frequency 0.03 \
+  --duration-seconds 60
+```
+
+Every command is also logged locally to CSV plus a JSON manifest so the exact stimulus used during data collection is preserved.
+
+## Structured Healthy Campaign
+
+The full step-by-step identification campaign is documented in:
+
+- [docs/belimo_test_campaign.md](/Users/pabloarcos/Desktop/Start%20Hack/backend-starthack/docs/belimo_test_campaign.md)
+
+That runbook uses:
+
+- `scripts/run_belimo_test.py` for command excitation
+- `scripts/collect_belimo_data.py` for telemetry capture
+
+Each run produces:
+
+- telemetry CSV
+- command CSV
+- manifest JSON
+
+## Baseline Model API
+
+The backend also exposes the calibrated healthy baseline and comparison endpoints for the frontend.
+
+Reference:
+
+- [docs/baseline_model_api.md](/Users/pabloarcos/Desktop/Start%20Hack/backend-starthack/docs/baseline_model_api.md)
+
 ## Project Structure
 
 ```text
@@ -78,6 +135,10 @@ backend-starthack/
 | POST   | `/api/features/ingest` | Guarda muestras raw/mock, calcula features y actualiza baseline |
 | GET    | `/api/features/devices/<device_id>/latest` | Devuelve las últimas muestras, features y baseline |
 | POST   | `/api/features/seed-demo` | Inserta datos demo para probar el MVP |
+| GET    | `/api/baseline-model/summary` | Devuelve parámetros y diagnósticos del modelo baseline |
+| GET    | `/api/baseline-model/report` | Devuelve el reporte completo del baseline |
+| GET    | `/api/baseline-model/waveforms/<waveform_type>` | Devuelve baseline y envelope por waveform |
+| POST   | `/api/baseline-model/recalibrate` | Recalibra el baseline desde CSVs de campaña |
 
 ## Auth Flow (Frontend -> Backend)
 

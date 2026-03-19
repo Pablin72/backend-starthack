@@ -1,0 +1,19 @@
+{
+  "suite": "single",
+  "test_number": 2003,
+  "run_started_at": "2026-03-19T03:49:14.092381+00:00",
+  "run_finished_at": "2026-03-19T03:51:14.550119+00:00",
+  "poll_seconds": 1.0,
+  "phase_count": 1,
+  "total_commands": 115,
+  "phases": [
+    {
+      "name": "single_square",
+      "mode": "square",
+      "duration_seconds": 120.0,
+      "bias": 80.0,
+      "amplitude": 10.0,
+      "frequency": 0.02
+    }
+  ]
+}
