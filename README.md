@@ -133,6 +133,7 @@ backend-starthack/
 | GET    | `/health` | Health check         |
 | POST   | `/api/foundry/test-llm` | Prueba de modelo LLM (requiere token estático) |
 | POST   | `/api/features/ingest` | Guarda muestras raw/mock, calcula features y actualiza baseline |
+| GET    | `/api/features/devices/<device_id>/latest-sample` | Devuelve solo la última muestra recibida para un device |
 | GET    | `/api/features/devices/<device_id>/latest` | Devuelve las últimas muestras, features y baseline |
 | POST   | `/api/features/seed-demo` | Inserta datos demo para probar el MVP |
 | GET    | `/api/baseline-model/summary` | Devuelve parámetros y diagnósticos del modelo baseline |

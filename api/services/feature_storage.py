@@ -200,6 +200,39 @@ def get_recent_samples(device_id: str, storage_kind: str, limit: int) -> list[di
     return samples
 
 
+def get_latest_sample(device_id: str, storage_kind: str) -> dict[str, Any] | None:
+    table_name = "raw_samples" if storage_kind == "raw" else "mock_samples"
+    source_column = "source" if storage_kind == "raw" else "scenario"
+
+    with db_connection() as connection:
+        row = connection.execute(
+            f"""
+            SELECT *
+            FROM {table_name}
+            WHERE device_id = ?
+            ORDER BY timestamp DESC, id DESC
+            LIMIT 1
+            """,
+            (device_id,),
+        ).fetchone()
+
+    if row is None:
+        return None
+
+    return {
+        "id": row["id"],
+        "device_id": row["device_id"],
+        "timestamp": row["timestamp"],
+        "position": row["position"],
+        "torque": row["torque"],
+        "temperature": row["temperature"],
+        "power": row["power"],
+        "setpoint": row["setpoint"],
+        "source_name": row[source_column],
+        "created_at": row["created_at"],
+    }
+
+
 def insert_feature_snapshot(
     *,
     storage_kind: str,

@@ -7,6 +7,7 @@ from api.services.feature_engine import compute_features, normalize_sample, upda
 from api.services.feature_storage import (
     get_baseline_profile,
     get_latest_feature_snapshot,
+    get_latest_sample,
     get_recent_samples,
     init_db,
     insert_feature_snapshot,
@@ -168,6 +169,59 @@ def get_latest_device_state(device_id: str):
             "recent_samples": samples,
             "latest_feature_snapshot": snapshot,
             "baseline": baseline,
+        }
+    )
+
+
+@feature_bp.route("/devices/<device_id>/latest-sample", methods=["GET"])
+@require_frontend_token
+def get_latest_device_sample(device_id: str):
+    """
+    Return the most recent gathered sample for a device.
+    ---
+    tags:
+      - Features
+    security:
+      - Bearer: []
+    parameters:
+      - in: path
+        name: device_id
+        required: true
+        type: string
+      - in: query
+        name: storage_kind
+        type: string
+        required: false
+    responses:
+      200:
+        description: Latest device sample
+      404:
+        description: No sample found for the device
+    """
+    storage_kind = request.args.get("storage_kind", "").strip().lower() or "raw"
+    if storage_kind not in {"raw", "mock"}:
+        return jsonify({"status": "error", "message": "storage_kind must be 'raw' or 'mock'"}), 400
+
+    sample = get_latest_sample(device_id, storage_kind)
+    if sample is None:
+        return (
+            jsonify(
+                {
+                    "status": "error",
+                    "message": f"No samples found for device '{device_id}'",
+                    "device_id": device_id,
+                    "storage_kind": storage_kind,
+                }
+            ),
+            404,
+        )
+
+    return jsonify(
+        {
+            "status": "success",
+            "device_id": device_id,
+            "storage_kind": storage_kind,
+            "latest_sample": sample,
         }
     )
 
