@@ -11,6 +11,8 @@ from api.services.comparison_service import (
     get_model_metadata,
     get_model_readiness,
 )
+from api.services.llm_service import generate_alert_analysis
+from api.services.telegram_service import send_telegram_alert
 
 
 baseline_model_bp = Blueprint("baseline_model", __name__)
@@ -173,7 +175,40 @@ def combined_evaluation():
     """
     payload = request.get_json() or {}
     try:
-        return jsonify({"status": "success", "evaluation": evaluate_combined(payload)})
+        evaluation_result = evaluate_combined(payload)
+
+        # ------------------------------------------------------------------
+        # AI ALERT SIMULATION
+        # ------------------------------------------------------------------
+        summary_status = evaluation_result.get("summary", {}).get("status", "unknown")
+        ai_message = None
+
+        if summary_status in ["warning", "critical"]:
+            try:
+                # Generate AI analysis
+                ai_message = generate_alert_analysis(evaluation_result)
+                
+                # Print to console for verification as requested
+                print(f"\n======== [SIMULATION] AI ALERT GENERATED ({summary_status.upper()}) ========")
+                print(ai_message)
+                print("==================================================================\n")
+                
+                # Send to Telegram
+                send_telegram_alert(ai_message)
+
+            except Exception as e:
+                print(f"Error generating AI alert analysis: {e}")
+        # ------------------------------------------------------------------
+
+        response = {
+            "status": "success",
+            "evaluation": evaluation_result
+        }
+        
+        if ai_message:
+            response["ai_analysis"] = ai_message
+
+        return jsonify(response)
     except FileNotFoundError as error:
         return jsonify({"status": "error", "message": str(error)}), 404
     except ValueError as error:
