@@ -38,6 +38,7 @@ from collections import deque
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
+from concurrent.futures import ThreadPoolExecutor
 
 import requests
 from dotenv import load_dotenv
@@ -60,8 +61,11 @@ load_dotenv(override=False)     # fall back to root .env
 
 logging.basicConfig(
     level=logging.INFO,
-    format="%(asctime)s [%(levelname)s] %(name)s — %(message)s",
+    format="%(asctime)s %(levelname)s — %(message)s",
     datefmt="%H:%M:%S",
+    handlers=[
+        logging.StreamHandler(sys.stdout),
+    ]
 )
 logger = logging.getLogger("edge_gateway")
 
@@ -87,13 +91,16 @@ FLASK_INGEST_URL = os.getenv("FLASK_INGEST_URL", "http://localhost:5000/api/feat
 FLASK_BASELINE_URL = os.getenv("FLASK_BASELINE_URL", "http://localhost:5000/api/baseline-model/evaluate/combined")
 FLASK_TOKEN      = os.getenv("FLASK_TOKEN", "starthack_front_2026_allow")
 
-# Waveform context — sent to /api/baseline-model/evaluate/combined
-# Must match the test profile running on the actuator
+# ── Waveform context — sent to /api/baseline-model/evaluate/combined
 WAVEFORM_TYPE      = os.getenv("WAVEFORM_TYPE", "square")
 WAVEFORM_BIAS      = float(os.getenv("WAVEFORM_BIAS", "50.0"))
 WAVEFORM_AMPLITUDE = float(os.getenv("WAVEFORM_AMPLITUDE", "20.0"))
 WAVEFORM_FREQUENCY = float(os.getenv("WAVEFORM_FREQUENCY", "0.02"))
 EVAL_BATCH_SIZE    = int(os.getenv("EVAL_BATCH_SIZE", "10"))
+
+# ── Telegram config ───────────────────────────────────────────────────────────
+TELEGRAM_TOKEN   = os.getenv("TELEGRAM_TOKEN", "").strip()
+TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID", "").strip()
 
 POLL_SECONDS     = float(os.getenv("POLL_SECONDS", "2.0"))
 BUFFER_SIZE      = int(os.getenv("BUFFER_SIZE", "10"))
@@ -133,6 +140,8 @@ _prev: dict[str, float | None] = {
 _eval_batch: deque[dict[str, Any]] = deque(maxlen=EVAL_BATCH_SIZE)
 _eval_batch_count: int = 0   # total readings since last evaluation POST
 
+# Thread pool for non-blocking HTTP requests to Azure
+_http_executor = ThreadPoolExecutor(max_workers=10)
 
 # ═══════════════════════════════════════════════════════════════════════════════
 # ── Field Mapper ──────────────────────────────────────────────────────────────
@@ -266,7 +275,7 @@ def _build_mqtt_payload(reading: dict[str, Any], meta: dict[str, Any]) -> str:
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
-# ── Flask HTTP Bridge ────────────────────────────────────────────────────────
+# ── Flask HTTP Bridge (Async via ThreadPool) ─────────────────────────────────
 # ═══════════════════════════════════════════════════════════════════════════════
 
 def _flask_ingest_headers() -> dict[str, str]:
@@ -276,82 +285,57 @@ def _flask_ingest_headers() -> dict[str, str]:
     }
 
 
-def _post_to_flask_ingest(reading: dict[str, Any]) -> bool:
-    """POST a single reading to Flask /api/features/ingest. Returns True on success."""
+def _do_post_ingest_batch(readings: list[dict[str, Any]]) -> None:
+    """Internal task for the thread pool to POST a batch of readings."""
+    samples = []
+    for r in readings:
+        samples.append({
+            "device_id":   r["device_id"],
+            "timestamp":   r["timestamp"],
+            "position":    r["position"],
+            "torque":      r["torque"],
+            "temperature": r["temperature"],
+            "power":       r["power"],
+            "setpoint":    r["setpoint"],
+        })
+
     body = {
         "storage_kind": "raw",
         "source_name":  "edge_mqtt",
-        "sample": {
-            "device_id":   reading["device_id"],
-            "timestamp":   reading["timestamp"],
-            "position":    reading["position"],
-            "torque":      reading["torque"],
-            "temperature": reading["temperature"],
-            "power":       reading["power"],
-            "setpoint":    reading["setpoint"],
-        },
+        "samples":      samples,
     }
     try:
-        resp = requests.post(
-            FLASK_INGEST_URL,
-            json=body,
-            headers=_flask_ingest_headers(),
-            timeout=5,
-        )
-        if resp.status_code == 200:
-            logger.debug("Flask ingest OK | device=%s ts=%s", DEVICE_ID, reading["timestamp"])
-            return True
-        logger.warning("Flask ingest non-200: %s %s", resp.status_code, resp.text[:120])
-        return False
-    except requests.exceptions.ConnectionError:
-        logger.error("Flask unreachable at %s — reading buffered", FLASK_INGEST_URL)
-        return False
-    except requests.exceptions.Timeout:
-        logger.error("Flask ingest timed out — reading buffered")
-        return False
+        resp = requests.post(FLASK_INGEST_URL, json=body, headers=_flask_ingest_headers(), timeout=5)
+        if resp.status_code != 200:
+            logger.debug("Flask ingest non-200: %s", resp.status_code)
+    except Exception:
+        # Silently fail background thread, the main thread handles buffering if needed
+        pass
+
+
+def _post_to_flask_ingest_batch(readings: list[dict[str, Any]]) -> bool:
+    """Submits a list of readings to the thread pool for ingestion."""
+    if not readings:
+        return True
+    # Pass a copy to avoid mutation
+    _http_executor.submit(_do_post_ingest_batch, list(readings))
+    return True
+
 
 
 def _flush_buffer_to_flask() -> None:
-    """Drain the local buffer by retrying each buffered reading against Flask."""
+    """Drain the local buffer in a batch."""
     if not _buffer:
         return
-    logger.info("Flushing %d buffered reading(s) to Flask …", len(_buffer))
-    flushed = 0
-    for _ in range(len(_buffer)):
-        if not _buffer:
-            break
-        reading = _buffer[0]
-        if _post_to_flask_ingest(reading):
-            _buffer.popleft()
-            flushed += 1
-        else:
-            break   # Flask still down — stop trying
-    if flushed:
-        logger.info("Flushed %d reading(s). Buffer remaining: %d", flushed, len(_buffer))
+    logger.info("Flushing %d buffered reading(s) to Flask backend …", len(_buffer))
+    batch = []
+    while _buffer:
+        batch.append(_buffer.popleft())
+    _post_to_flask_ingest_batch(batch)
 
 
-def _post_evaluation_batch() -> None:
-    """
-    POST the current _eval_batch to /api/baseline-model/evaluate/combined.
-    Uses the exact field names the Azure API expects:
-      torque_signed, temperature_c, position_pct
-    Called every EVAL_BATCH_SIZE readings.
-    """
-    global _eval_batch_count
-    if len(_eval_batch) < 2:
-        return
-
-    telemetry_series = [
-        {
-            "timestamp":    r["timestamp"],
-            "torque_signed": r["torque"],          # Nm
-            "temperature_c": r["temperature"],
-            "position_pct":  r["position"],
-            "feedback_position_%": r["position"],  # alias for comparison_service
-        }
-        for r in _eval_batch
-    ]
-
+def _do_post_eval_batch(telemetry_series: list[dict[str, Any]]) -> None:
+    """Background task to POST the eval batch."""
     body = {
         "device_id":    DEVICE_ID,
         "waveform_type": WAVEFORM_TYPE,
@@ -363,34 +347,62 @@ def _post_evaluation_batch() -> None:
         },
         "telemetry_series": telemetry_series,
     }
-
     try:
-        resp = requests.post(
-            FLASK_BASELINE_URL,
-            json=body,
-            headers=_flask_ingest_headers(),
-            timeout=10,
-        )
+        resp = requests.post(FLASK_BASELINE_URL, json=body, headers=_flask_ingest_headers(), timeout=10)
         if resp.status_code == 200:
             result = resp.json().get("evaluation", {})
             summary = result.get("summary", {})
             status  = summary.get("status", "?")
             insight = summary.get("insight", "")
-            logger.info(
-                "🧠 BASELINE EVAL [%d samples] → status=%s | %s",
-                len(telemetry_series), status.upper(), insight,
-            )
+            logger.info("🧠 BASELINE EVAL [%d samples] → status=%s | %s", len(telemetry_series), status.upper(), insight)
             if status in ("warning", "anomaly"):
                 logger.warning("⚠️  BASELINE DEVIATION DETECTED: %s", insight)
-        else:
-            logger.warning("Baseline eval non-200: %s %s", resp.status_code, resp.text[:160])
-    except requests.exceptions.ConnectionError:
-        logger.error("Azure backend unreachable for evaluation batch")
-    except requests.exceptions.Timeout:
-        logger.error("Baseline eval request timed out")
+                _send_telegram_alert(f"🚨 *ANOMALY (Baseline)* 🚨\n\nDevice: `{DEVICE_ID}`\nStatus: `{status.upper()}`\n\n{insight}")
+    except Exception as exc:
+        logger.debug("Failed to post eval batch: %s", exc)
 
+
+def _post_evaluation_batch() -> None:
+    """Submits the current _eval_batch snapshot to the thread pool."""
+    global _eval_batch_count
+    if len(_eval_batch) < 2:
+        return
+
+    # Snapshot the queue for the background thread
+    telemetry_series = []
+    for r in list(_eval_batch):
+        telemetry_series.append({
+            "timestamp":    r["timestamp"],
+            "torque_signed": r["torque"],
+            "temperature_c": r["temperature"],
+            "position_pct":  r["position"],
+            "feedback_position_%": r["position"],
+        })
+
+    _http_executor.submit(_do_post_eval_batch, telemetry_series)
     _eval_batch_count = 0
 
+
+# ── Telegram Alert ────────────────────────────────────────────────────────────
+
+def _do_telegram_alert(msg: str) -> None:
+    """Runs inside the thread pool to prevent blocking."""
+    if not TELEGRAM_TOKEN or not TELEGRAM_CHAT_ID:
+        return
+    url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
+    payload = {
+        "chat_id": TELEGRAM_CHAT_ID,
+        "text": msg,
+        "parse_mode": "Markdown"
+    }
+    try:
+        requests.post(url, json=payload, timeout=5)
+    except Exception as exc:
+        logger.debug("Failed to send Telegram alert: %s", exc)
+
+def _send_telegram_alert(msg: str) -> None:
+    """Queue a telegram alert to the background thread pool."""
+    _http_executor.submit(_do_telegram_alert, msg)
 
 # ═══════════════════════════════════════════════════════════════════════════════
 # ── MQTT Callbacks ────────────────────────────────────────────────────────────
@@ -556,13 +568,22 @@ def _poll_and_publish(influx: InfluxDBClient, client: mqtt.Client) -> None:
             continue
 
         # ── 3. Filter already-seen rows ────────────────────────────────────────
-        new_rows = [
-            r for r in rows
-            if last_seen_ts is None or r["_time_str"] > last_seen_ts
-        ]
+        # Identify the absolute newest timestamp across all returned rows to fast-forward if needed
+        all_new_ts = [r["_time_str"] for r in rows if last_seen_ts is None or r["_time_str"] > last_seen_ts]
+
+        if len(all_new_ts) > 100:
+            # We are severely backlogged (e.g. 10+ seconds behind).
+            # Fast forward to the most recent 20 rows to stay real-time.
+            logger.warning("⚠️ Backlog detected (%d rows). Fast-forwarding to real-time.", len(all_new_ts))
+            cutoff_ts = sorted(all_new_ts)[-20]
+            new_rows = [r for r in rows if r["_time_str"] >= cutoff_ts]
+        else:
+            new_rows = [r for r in rows if last_seen_ts is None or r["_time_str"] > last_seen_ts]
 
         if new_rows:
-            logger.info("InfluxDB → %d new row(s)", len(new_rows))
+            logger.debug("InfluxDB → %d new row(s)", len(new_rows))
+
+        batch_to_ingest = []
 
         for row in new_rows:
             ts = row["_time_str"]
@@ -577,15 +598,30 @@ def _poll_and_publish(influx: InfluxDBClient, client: mqtt.Client) -> None:
             meta = _compute_all_deltas(reading)
             anomaly = meta["anomaly_flag"]
 
+            # If anomaly detected locally, shoot an alert
+            if anomaly:
+                alert_text = (
+                    f"⚠️ *LOCAL THRESHOLD ALERT* ⚠️\n\n"
+                    f"Device: `{DEVICE_ID}`\n"
+                    f"Time: `{ts}`\n"
+                    f"Values:\n"
+                    f"• Pos: {reading['position']}%\n"
+                    f"• Pwr: {reading['power']}W (Δ {meta['power_delta_pct']}%)"
+                )
+                _send_telegram_alert(alert_text)
+
+            # Accumulate for batch ingest
+            batch_to_ingest.append(reading)
+
             # ── 6. MQTT publish (fire-and-forget, non-blocking) ─────────────────
             mqtt_payload = _build_mqtt_payload(reading, meta)
             if _mqtt_connected.is_set():
                 result = client.publish(TELEMETRY_TOPIC, mqtt_payload, qos=1)
                 if result.rc == 0:
                     logger.info(
-                        "📡 MQTT | pos=%.1f%% τ=%.4fNm T=%.1f°C P=%.1fW "
+                        "📡 MQTT [%s] | pos=%.1f%% τ=%.4fNm T=%.1f°C P=%.1fW "
                         "| Δτ=%.1f%% ΔT=%.1f%% ΔP=%.1f%% Δr=%.1f%% anomaly=%s",
-                        reading["position"], reading["torque"],
+                        ts, reading["position"], reading["torque"],
                         reading["temperature"], reading["power"],
                         meta["torque_delta_pct"], meta["temperature_delta_pct"],
                         meta["power_delta_pct"],  meta["position_delta_pct"],
@@ -598,18 +634,16 @@ def _poll_and_publish(influx: InfluxDBClient, client: mqtt.Client) -> None:
                 logger.warning("MQTT disconnected — buffering reading (buf=%d)", len(_buffer))
                 _buffer.append(reading)
 
-            # ── 7. HTTP POST to Flask ingest ───────────────────────────────────
-            if not _post_to_flask_ingest(reading):
-                _buffer.append(reading)
-            else:
-                _flush_buffer_to_flask()
-
-            # ── 8. Accumulate eval batch ──────────────────────────────────
+            # ── 7. Accumulate eval batch ──────────────────────────────────
             global _eval_batch_count
             _eval_batch.append(reading)
             _eval_batch_count += 1
             if _eval_batch_count >= EVAL_BATCH_SIZE:
                 _post_evaluation_batch()
+
+        # Submit the whole polling cycle's readings to Flask in ONE request
+        if batch_to_ingest:
+            _post_to_flask_ingest_batch(batch_to_ingest)
 
         # ── 8. Sleep remainder of poll interval ────────────────────────────────
         elapsed = time.monotonic() - loop_start
