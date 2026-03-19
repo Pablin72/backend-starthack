@@ -41,7 +41,8 @@ from typing import Any
 
 import requests
 from dotenv import load_dotenv
-from influxdb_client import InfluxDBClient
+from influxdb_client import InfluxDBClient, Point
+from influxdb_client.client.write_api import SYNCHRONOUS
 
 # ── paho-mqtt v2 compatibility shim ──────────────────────────────────────────
 try:
@@ -118,6 +119,7 @@ _buffer: deque[dict[str, Any]] = deque(maxlen=BUFFER_SIZE)
 _should_stop = threading.Event()
 _mqtt_client: mqtt.Client | None = None
 _mqtt_connected = threading.Event()
+_influx_write_api: Any | None = None  # Used to send commands back to the actuator
 
 # Previous-reading state for all 4 delta signals
 _prev: dict[str, float | None] = {
@@ -433,8 +435,21 @@ def _handle_command(command: dict[str, Any]) -> None:
     elif action == "ping":
         logger.info("[CMD] PING received — edge is healthy.")
     elif action == "set_setpoint":
-        value = command.get("value")
-        logger.info("[CMD] SET_SETPOINT → %.1f%%", float(value or 0))
+        value = float(command.get("value", 0.0))
+        logger.info("[CMD] SET_SETPOINT → %.1f%%", value)
+        if _influx_write_api:
+            try:
+                # The logger script reads from _process with a fixed epoch timestamp
+                p = Point("_process") \
+                    .field("setpoint_position_%", value) \
+                    .field("test_number", -1) \
+                    .time(0)  # Epoch 0
+                _influx_write_api.write(bucket=INFLUX_BUCKET, record=p)
+                logger.info("   ↳ Written to InfluxDB _process measurement successfully.")
+            except Exception as exc:
+                logger.error("   ↳ Failed to write command to InfluxDB: %s", exc)
+        else:
+            logger.warning("   ↳ Cannot write command — InfluxDB write API not initialized.")
     else:
         logger.info("[CMD] Unknown action '%s' — logged and ignored.", action)
 
@@ -651,6 +666,9 @@ def main() -> int:
 
     # ── Connect to InfluxDB ───────────────────────────────────────────────────
     influx = InfluxDBClient(url=INFLUX_URL, token=INFLUX_TOKEN, org=INFLUX_ORG, verify_ssl=False)
+    
+    global _influx_write_api
+    _influx_write_api = influx.write_api(write_options=SYNCHRONOUS)
 
     try:
         _poll_and_publish(influx, _mqtt_client)
