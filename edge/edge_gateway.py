@@ -42,8 +42,11 @@ from concurrent.futures import ThreadPoolExecutor
 
 import requests
 from dotenv import load_dotenv
-from influxdb_client import InfluxDBClient, Point
+from influxdb_client import InfluxDBClient, Point, WritePrecision
 from influxdb_client.client.write_api import SYNCHRONOUS
+from datetime import datetime, timezone
+
+COMMAND_TIMESTAMP = datetime.fromtimestamp(0, tz=timezone.utc)
 
 # ── paho-mqtt v2 compatibility shim ──────────────────────────────────────────
 try:
@@ -463,9 +466,9 @@ def _handle_command(command: dict[str, Any]) -> None:
             try:
                 # The logger script reads from _process with a fixed epoch timestamp
                 p = Point("_process") \
-                    .field("setpoint_position_%", value) \
+                    .field("setpoint_position_%", float(value)) \
                     .field("test_number", -1) \
-                    .time(0)  # Epoch 0
+                    .time(COMMAND_TIMESTAMP, WritePrecision.MS)
                 _influx_write_api.write(bucket=INFLUX_BUCKET, record=p)
                 logger.info("   ↳ Written to InfluxDB _process measurement successfully.")
             except Exception as exc:
