@@ -86,6 +86,14 @@ FLASK_INGEST_URL = os.getenv("FLASK_INGEST_URL", "http://localhost:5000/api/feat
 FLASK_BASELINE_URL = os.getenv("FLASK_BASELINE_URL", "http://localhost:5000/api/baseline-model/evaluate/combined")
 FLASK_TOKEN      = os.getenv("FLASK_TOKEN", "starthack_front_2026_allow")
 
+# Waveform context — sent to /api/baseline-model/evaluate/combined
+# Must match the test profile running on the actuator
+WAVEFORM_TYPE      = os.getenv("WAVEFORM_TYPE", "square")
+WAVEFORM_BIAS      = float(os.getenv("WAVEFORM_BIAS", "50.0"))
+WAVEFORM_AMPLITUDE = float(os.getenv("WAVEFORM_AMPLITUDE", "20.0"))
+WAVEFORM_FREQUENCY = float(os.getenv("WAVEFORM_FREQUENCY", "0.02"))
+EVAL_BATCH_SIZE    = int(os.getenv("EVAL_BATCH_SIZE", "10"))
+
 POLL_SECONDS     = float(os.getenv("POLL_SECONDS", "2.0"))
 BUFFER_SIZE      = int(os.getenv("BUFFER_SIZE", "10"))
 
@@ -118,6 +126,10 @@ _prev: dict[str, float | None] = {
     "power":       None,
     "position":    None,
 }
+
+# Rolling batch for evaluate/combined — keeps last EVAL_BATCH_SIZE readings
+_eval_batch: deque[dict[str, Any]] = deque(maxlen=EVAL_BATCH_SIZE)
+_eval_batch_count: int = 0   # total readings since last evaluation POST
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -316,6 +328,68 @@ def _flush_buffer_to_flask() -> None:
         logger.info("Flushed %d reading(s). Buffer remaining: %d", flushed, len(_buffer))
 
 
+def _post_evaluation_batch() -> None:
+    """
+    POST the current _eval_batch to /api/baseline-model/evaluate/combined.
+    Uses the exact field names the Azure API expects:
+      torque_signed, temperature_c, position_pct
+    Called every EVAL_BATCH_SIZE readings.
+    """
+    global _eval_batch_count
+    if len(_eval_batch) < 2:
+        return
+
+    telemetry_series = [
+        {
+            "timestamp":    r["timestamp"],
+            "torque_signed": r["torque"],          # Nm
+            "temperature_c": r["temperature"],
+            "position_pct":  r["position"],
+            "feedback_position_%": r["position"],  # alias for comparison_service
+        }
+        for r in _eval_batch
+    ]
+
+    body = {
+        "device_id":    DEVICE_ID,
+        "waveform_type": WAVEFORM_TYPE,
+        "waveform": {
+            "waveform_type": WAVEFORM_TYPE,
+            "bias":          WAVEFORM_BIAS,
+            "amplitude":     WAVEFORM_AMPLITUDE,
+            "frequency":     WAVEFORM_FREQUENCY,
+        },
+        "telemetry_series": telemetry_series,
+    }
+
+    try:
+        resp = requests.post(
+            FLASK_BASELINE_URL,
+            json=body,
+            headers=_flask_ingest_headers(),
+            timeout=10,
+        )
+        if resp.status_code == 200:
+            result = resp.json().get("evaluation", {})
+            summary = result.get("summary", {})
+            status  = summary.get("status", "?")
+            insight = summary.get("insight", "")
+            logger.info(
+                "🧠 BASELINE EVAL [%d samples] → status=%s | %s",
+                len(telemetry_series), status.upper(), insight,
+            )
+            if status in ("warning", "anomaly"):
+                logger.warning("⚠️  BASELINE DEVIATION DETECTED: %s", insight)
+        else:
+            logger.warning("Baseline eval non-200: %s %s", resp.status_code, resp.text[:160])
+    except requests.exceptions.ConnectionError:
+        logger.error("Azure backend unreachable for evaluation batch")
+    except requests.exceptions.Timeout:
+        logger.error("Baseline eval request timed out")
+
+    _eval_batch_count = 0
+
+
 # ═══════════════════════════════════════════════════════════════════════════════
 # ── MQTT Callbacks ────────────────────────────────────────────────────────────
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -509,12 +583,18 @@ def _poll_and_publish(influx: InfluxDBClient, client: mqtt.Client) -> None:
                 logger.warning("MQTT disconnected — buffering reading (buf=%d)", len(_buffer))
                 _buffer.append(reading)
 
-            # ── 7. HTTP POST to Flask ───────────────────────────────────────────
+            # ── 7. HTTP POST to Flask ingest ───────────────────────────────────
             if not _post_to_flask_ingest(reading):
                 _buffer.append(reading)
             else:
-                # If Flask came back online, try to flush buffered readings
                 _flush_buffer_to_flask()
+
+            # ── 8. Accumulate eval batch ──────────────────────────────────
+            global _eval_batch_count
+            _eval_batch.append(reading)
+            _eval_batch_count += 1
+            if _eval_batch_count >= EVAL_BATCH_SIZE:
+                _post_evaluation_batch()
 
         # ── 8. Sleep remainder of poll interval ────────────────────────────────
         elapsed = time.monotonic() - loop_start
