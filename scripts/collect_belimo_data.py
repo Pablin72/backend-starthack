@@ -14,7 +14,8 @@ from typing import Any
 from influxdb_client import InfluxDBClient
 
 
-DEFAULT_URL = "http://192.168.3.14:8086"
+#DEFAULT_URL = "http://192.168.3.14:8086"
+DEFAULT_URL = "http://192.168.5.14:8086"
 DEFAULT_TOKEN = "pf-OGC6AQFmKy64gOzRM12DZrCuavnWeMgRZ2kDMOk8LYK22evDJnoyKGcmY49EgT8HnMDE9GPQeg30vXeHsRQ=="
 DEFAULT_ORG = "belimo"
 DEFAULT_BUCKET = "actuator-data"
