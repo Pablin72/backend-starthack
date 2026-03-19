@@ -1,0 +1,19 @@
+{
+  "suite": "single",
+  "test_number": 4002,
+  "run_started_at": "2026-03-19T04:01:07.327392+00:00",
+  "run_finished_at": "2026-03-19T04:04:07.396730+00:00",
+  "poll_seconds": 1.0,
+  "phase_count": 1,
+  "total_commands": 172,
+  "phases": [
+    {
+      "name": "single_sine",
+      "mode": "sine",
+      "duration_seconds": 180.0,
+      "bias": 50.0,
+      "amplitude": 10.0,
+      "frequency": 0.04
+    }
+  ]
+}

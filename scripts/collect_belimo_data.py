@@ -77,6 +77,15 @@ def parse_args() -> argparse.Namespace:
         default=DEFAULT_FIELDS,
         help="Fields to fetch from the measurement",
     )
+    parser.add_argument("--device-id", default="BELIMO-8", help="Device identifier written to every saved row")
+    parser.add_argument("--test-id", default="", help="Run identifier written to every saved row")
+    parser.add_argument("--waveform-type", default="", help="Waveform label written to every saved row")
+    parser.add_argument("--bias", type=float, default=None, help="Bias metadata written to every saved row")
+    parser.add_argument("--amplitude", type=float, default=None, help="Amplitude metadata written to every saved row")
+    parser.add_argument("--frequency", type=float, default=None, help="Frequency metadata written to every saved row")
+    parser.add_argument("--test-purpose", default="", help="Purpose label written to every saved row")
+    parser.add_argument("--quality-label", default="unreviewed", help="Initial quality label written to every saved row")
+    parser.add_argument("--notes", default="", help="Free-text notes written to every saved row")
     return parser.parse_args()
 
 
@@ -138,6 +147,21 @@ def _normalize_time(value: Any) -> str:
     return str(value)
 
 
+def attach_metadata(row: dict[str, Any], args: argparse.Namespace) -> dict[str, Any]:
+    enriched = dict(row)
+    enriched["device_id"] = args.device_id
+    enriched["test_id"] = args.test_id
+    enriched["waveform_type"] = args.waveform_type
+    enriched["bias"] = args.bias
+    enriched["amplitude"] = args.amplitude
+    enriched["frequency"] = args.frequency
+    enriched["test_purpose"] = args.test_purpose
+    enriched["quality_label"] = args.quality_label
+    enriched["notes"] = args.notes
+    enriched["cycle_id"] = None
+    return enriched
+
+
 def append_csv(path: Path, rows: list[dict[str, Any]], fieldnames: list[str]) -> None:
     file_exists = path.exists()
     with path.open("a", newline="", encoding="utf-8") as handle:
@@ -170,7 +194,20 @@ def main() -> int:
     signal.signal(signal.SIGINT, handle_stop)
     signal.signal(signal.SIGTERM, handle_stop)
 
-    fieldnames = ["timestamp", *args.fields]
+    fieldnames = [
+        "timestamp",
+        "device_id",
+        "test_id",
+        "waveform_type",
+        "bias",
+        "amplitude",
+        "frequency",
+        "test_purpose",
+        "quality_label",
+        "notes",
+        "cycle_id",
+        *args.fields,
+    ]
     started_at = time.time()
     last_seen_timestamp: str | None = None
     total_saved = 0
@@ -204,7 +241,7 @@ def main() -> int:
                 current_timestamp = row["timestamp"]
                 if last_seen_timestamp is not None and current_timestamp <= last_seen_timestamp:
                     continue
-                new_rows.append(row)
+                new_rows.append(attach_metadata(row, args))
 
             if new_rows:
                 if args.format == "csv":

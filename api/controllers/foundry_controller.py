@@ -1,11 +1,9 @@
 import logging
 import os
+import urllib.parse
 
 from flask import Blueprint, jsonify, request
-
-from azure.ai.inference import ChatCompletionsClient
-from azure.core.credentials import AzureKeyCredential
-from azure.core.exceptions import HttpResponseError
+from openai import AzureOpenAI, OpenAIError
 
 from api.security import require_frontend_token
 
@@ -13,20 +11,15 @@ foundry_bp = Blueprint("foundry", __name__)
 logger = logging.getLogger("backend-starthack.foundry")
 
 
-def _build_endpoint_candidates(raw_endpoint: str) -> list[str]:
-    base = raw_endpoint.strip().rstrip("/")
-    if not base:
-        return []
-
-    candidates = [base]
-    if "services.ai.azure.com" in base and not base.endswith("/models"):
-        candidates.append(f"{base}/models")
-
-    unique_candidates = []
-    for candidate in candidates:
-        if candidate not in unique_candidates:
-            unique_candidates.append(candidate)
-    return unique_candidates
+def _get_base_url(url: str) -> str:
+    """Extrae la URL base desde una ruta completa (ej. /openai/deployments) si es el caso."""
+    url = url.strip()
+    if not url:
+        return ""
+    parsed = urllib.parse.urlparse(url)
+    if parsed.scheme and parsed.netloc:
+        return f"{parsed.scheme}://{parsed.netloc}/"
+    return url
 
 
 @foundry_bp.route("/test-llm", methods=["POST"])
@@ -73,56 +66,39 @@ def test_llm():
     if not prompt:
         return jsonify({"error": "El campo 'prompt' es requerido"}), 400
 
-    endpoint = (os.environ.get("AZURE_FOUNDRY_ENDPOINT") or "").strip().rstrip("/")
+    raw_endpoint = os.environ.get("AZURE_FOUNDRY_ENDPOINT", "")
+    endpoint = _get_base_url(raw_endpoint)
     key = os.environ.get("AZURE_FOUNDRY_KEY")
     model_name = os.environ.get("AZURE_FOUNDRY_MODEL", "gpt-4o")
-    endpoint_candidates = _build_endpoint_candidates(endpoint)
+    api_version = os.environ.get("AZURE_OPENAI_API_VERSION", "2024-02-15-preview")
 
     logger.info(
-        "LLM request | origin=%s | model=%s | endpoint=%s | key_set=%s | candidates=%s",
+        "LLM request (OpenAI SDK) | origin=%s | model=%s | endpoint=%s | api_version=%s | key_set=%s",
         request.headers.get("Origin", ""),
         model_name,
         endpoint,
+        api_version,
         bool(key),
-        endpoint_candidates,
     )
 
     if not endpoint or not key:
-        logger.error("Missing Foundry env vars | endpoint_set=%s | key_set=%s", bool(endpoint), bool(key))
-        return jsonify({"error": "Faltan credenciales de Azure Foundry en las variables de entorno"}), 500
+        logger.error("Missing Azure OpenAI env vars | endpoint_set=%s | key_set=%s", bool(endpoint), bool(key))
+        return jsonify({"error": "Faltan credenciales de Azure OpenAI en las variables de entorno"}), 500
 
     try:
-        if not endpoint_candidates:
-            return jsonify({"status": "error", "message": "AZURE_FOUNDRY_ENDPOINT vacío o inválido"}), 500
+        client = AzureOpenAI(
+            azure_endpoint=endpoint,
+            api_key=key,
+            api_version=api_version,
+        )
 
-        response = None
-        last_http_error = None
-        used_endpoint = endpoint_candidates[0]
-
-        for endpoint_candidate in endpoint_candidates:
-            used_endpoint = endpoint_candidate
-            client = ChatCompletionsClient(
-                endpoint=endpoint_candidate,
-                credential=AzureKeyCredential(key),
-            )
-
-            try:
-                response = client.complete(
-                    messages=[
-                        {"role": "system", "content": "Eres un asistente de IA útil para un hackathon."},
-                        {"role": "user", "content": prompt},
-                    ],
-                    model=model_name,
-                )
-                break
-            except HttpResponseError as endpoint_error:
-                last_http_error = endpoint_error
-                if getattr(endpoint_error, "status_code", None) == 404:
-                    continue
-                raise
-
-        if response is None and last_http_error is not None:
-            raise last_http_error
+        response = client.chat.completions.create(
+            model=model_name,
+            messages=[
+                {"role": "system", "content": "Eres un asistente de IA útil para un hackathon."},
+                {"role": "user", "content": prompt},
+            ],
+        )
 
         llm_reply = response.choices[0].message.content
 
@@ -130,37 +106,20 @@ def test_llm():
             {
                 "status": "success",
                 "model": model_name,
-                "endpoint": used_endpoint,
+                "endpoint": endpoint,
                 "response": llm_reply,
             }
         )
-    except HttpResponseError as error:
-        status_code = getattr(error, "status_code", None)
+    except OpenAIError as error:
+        status_code = getattr(error, "status_code", 500)
         message = str(error)
         logger.error(
-            "Foundry HTTP error | status=%s | endpoint=%s | model=%s | message=%s",
+            "OpenAI SDK error | status=%s | endpoint=%s | model=%s | message=%s",
             status_code,
             endpoint,
             model_name,
             message,
         )
-
-        if status_code == 404:
-            return (
-                jsonify(
-                    {
-                        "status": "error",
-                        "message": "Foundry devolvió 404. Verifica AZURE_FOUNDRY_ENDPOINT y AZURE_FOUNDRY_MODEL.",
-                        "details": {
-                            "endpoint": endpoint,
-                            "endpoint_candidates": endpoint_candidates,
-                            "model": model_name,
-                            "hint": "Usa un endpoint de inferencia válido (models.ai.azure.com o services.ai.azure.com/models) y un modelo/deployment existente.",
-                        },
-                    }
-                ),
-                500,
-            )
 
         return (
             jsonify(
@@ -169,16 +128,16 @@ def test_llm():
                     "message": message,
                     "details": {
                         "endpoint": endpoint,
-                        "endpoint_candidates": endpoint_candidates,
+                        "raw_endpoint": raw_endpoint,
                         "model": model_name,
                         "status_code": status_code,
                     },
                 }
             ),
-            500,
+            status_code if isinstance(status_code, int) and status_code >= 400 else 500,
         )
     except Exception as error:
-        logger.exception("Unhandled Foundry error")
+        logger.exception("Unhandled error parsing LLM response")
         return (
             jsonify(
                 {
@@ -186,7 +145,7 @@ def test_llm():
                     "message": str(error),
                     "details": {
                         "endpoint": endpoint,
-                        "endpoint_candidates": endpoint_candidates,
+                        "raw_endpoint": raw_endpoint,
                         "model": model_name,
                     },
                 }

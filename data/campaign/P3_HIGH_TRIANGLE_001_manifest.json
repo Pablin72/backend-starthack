@@ -1,0 +1,19 @@
+{
+  "suite": "single",
+  "test_number": 3003,
+  "run_started_at": "2026-03-19T03:55:46.213283+00:00",
+  "run_finished_at": "2026-03-19T03:57:46.720797+00:00",
+  "poll_seconds": 1.0,
+  "phase_count": 1,
+  "total_commands": 116,
+  "phases": [
+    {
+      "name": "single_triangle",
+      "mode": "triangle",
+      "duration_seconds": 120.0,
+      "bias": 80.0,
+      "amplitude": 10.0,
+      "frequency": 0.04
+    }
+  ]
+}

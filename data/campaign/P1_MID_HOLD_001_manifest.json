@@ -1,0 +1,19 @@
+{
+  "suite": "single",
+  "test_number": 1002,
+  "run_started_at": "2026-03-19T03:43:39.793279+00:00",
+  "run_finished_at": "2026-03-19T03:44:10.475214+00:00",
+  "poll_seconds": 1.0,
+  "phase_count": 1,
+  "total_commands": 30,
+  "phases": [
+    {
+      "name": "single_constant",
+      "mode": "constant",
+      "duration_seconds": 30.0,
+      "bias": 50.0,
+      "amplitude": 0.0,
+      "frequency": 0.0
+    }
+  ]
+}
