@@ -1,4 +1,5 @@
 from __future__ import annotations
+import time
 
 from flask import Blueprint, jsonify, request
 
@@ -16,6 +17,12 @@ from api.services.telegram_service import send_telegram_alert
 
 
 baseline_model_bp = Blueprint("baseline_model", __name__)
+
+# Dictionary to store the last time an alert was fired for a specific device and state.
+# Expected format: {"device_id_status": timestamp}
+alert_cache = {}
+ALERT_COOLDOWN_SECONDS = 300  # Enforce a 5-minute freeze between repeating identical alerts
+
 
 
 @baseline_model_bp.route("/metadata", methods=["GET"])
@@ -178,26 +185,40 @@ def combined_evaluation():
         evaluation_result = evaluate_combined(payload)
 
         # ------------------------------------------------------------------
-        # AI ALERT SIMULATION
+        # AI ALERT SIMULATION (with Debouncing / Throttling)
         # ------------------------------------------------------------------
         summary_status = evaluation_result.get("summary", {}).get("status", "unknown")
         ai_message = None
 
         if summary_status in ["warning", "critical"]:
-            try:
-                # Generate AI analysis
-                ai_message = generate_alert_analysis(evaluation_result)
-                
-                # Print to console for verification as requested
-                print(f"\n======== [SIMULATION] AI ALERT GENERATED ({summary_status.upper()}) ========")
-                print(ai_message)
-                print("==================================================================\n")
-                
-                # Send to Telegram
-                send_telegram_alert(ai_message)
+            device_id = payload.get("device_id", "unknown_device")
+            cache_key = f"{device_id}_{summary_status}"
+            current_time = time.time()
+            
+            last_alert_time = alert_cache.get(cache_key, 0)
+            
+            # Check if this state has fired within the cooldown period
+            if (current_time - last_alert_time) >= ALERT_COOLDOWN_SECONDS:
+                try:
+                    # Generate AI analysis
+                    ai_message = generate_alert_analysis(evaluation_result)
+                    
+                    # Print to console for verification as requested
+                    print(f"\n======== [SIMULATION] AI ALERT GENERATED ({summary_status.upper()}) ========")
+                    print(ai_message)
+                    print("==================================================================\n")
+                    
+                    # Send to Telegram
+                    send_telegram_alert(ai_message)
+                    
+                    # Log the timestamp into cache to block consecutive loops
+                    alert_cache[cache_key] = current_time
 
-            except Exception as e:
-                print(f"Error generating AI alert analysis: {e}")
+                except Exception as e:
+                    print(f"Error generating AI alert analysis: {e}")
+            else:
+                remaining_time = int(ALERT_COOLDOWN_SECONDS - (current_time - last_alert_time))
+                print(f"[COOLDOWN ACTIVE] Suppressed duplicate Telegram alert for {cache_key}. Available again in {remaining_time}s.")
         # ------------------------------------------------------------------
 
         response = {

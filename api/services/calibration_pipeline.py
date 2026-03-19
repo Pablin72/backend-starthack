@@ -12,6 +12,13 @@ import pandas as pd
 
 EPSILON = 1e-9
 
+ENVELOPE_POLICY = {
+    "position": {"mad_scale": 3.0, "min_floor": 0.1},
+    "torque": {"mad_scale": 3.0, "min_floor": 0.1},
+    # Temperature is slow/quantized; wider floor reduces nuisance false positives.
+    "temperature": {"mad_scale": 4.0, "min_floor": 0.35},
+}
+
 
 @dataclass
 class CycleScore:
@@ -749,14 +756,33 @@ def build_envelopes(healthy_cycles: dict[str, Any], baseline: dict[str, Any]) ->
         temp_traces = np.vstack(
             [resample_cycle(cycle["internal_temperature_deg_C"].to_numpy(), 100) for _, cycle in waveform_df.groupby("cycle_id")]
         )
+        position_dev = mad(position_traces)
+        torque_dev = mad(torque_traces)
+        temp_dev = mad(temp_traces)
 
         envelopes[waveform] = {
-            "position_mad": [round(float(value), 6) for value in mad(position_traces)],
-            "torque_mad": [round(float(value), 6) for value in mad(torque_traces)],
-            "temperature_mad": [round(float(value), 6) for value in mad(temp_traces)],
-            "position_bounds": build_bounds(baseline[waveform]["reference_position"], mad(position_traces)),
-            "torque_bounds": build_bounds(baseline[waveform]["reference_torque"], mad(torque_traces)),
-            "temperature_bounds": build_bounds(baseline[waveform]["reference_temperature"], mad(temp_traces)),
+            "position_mad": [round(float(value), 6) for value in position_dev],
+            "torque_mad": [round(float(value), 6) for value in torque_dev],
+            "temperature_mad": [round(float(value), 6) for value in temp_dev],
+            "position_bounds": build_bounds(
+                baseline[waveform]["reference_position"],
+                position_dev,
+                min_floor=ENVELOPE_POLICY["position"]["min_floor"],
+                mad_scale=ENVELOPE_POLICY["position"]["mad_scale"],
+            ),
+            "torque_bounds": build_bounds(
+                baseline[waveform]["reference_torque"],
+                torque_dev,
+                min_floor=ENVELOPE_POLICY["torque"]["min_floor"],
+                mad_scale=ENVELOPE_POLICY["torque"]["mad_scale"],
+            ),
+            "temperature_bounds": build_bounds(
+                baseline[waveform]["reference_temperature"],
+                temp_dev,
+                min_floor=ENVELOPE_POLICY["temperature"]["min_floor"],
+                mad_scale=ENVELOPE_POLICY["temperature"]["mad_scale"],
+            ),
+            "envelope_policy": ENVELOPE_POLICY,
         }
     return envelopes
 
@@ -766,9 +792,15 @@ def mad(values: np.ndarray) -> np.ndarray:
     return np.median(np.abs(values - median), axis=0)
 
 
-def build_bounds(reference: list[float], deviation: np.ndarray) -> dict[str, list[float]]:
+def build_bounds(
+    reference: list[float],
+    deviation: np.ndarray,
+    *,
+    min_floor: float = 0.1,
+    mad_scale: float = 3.0,
+) -> dict[str, list[float]]:
     reference_array = np.asarray(reference)
-    spread = np.maximum(deviation * 3.0, 0.1)
+    spread = np.maximum(deviation * mad_scale, min_floor)
     return {
         "lower": [round(float(value), 6) for value in reference_array - spread],
         "upper": [round(float(value), 6) for value in reference_array + spread],
