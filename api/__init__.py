@@ -5,6 +5,7 @@ from dotenv import load_dotenv
 from flask import Flask, jsonify
 from flasgger import Swagger
 
+from api.controllers.feature_controller import feature_bp
 from api.controllers.foundry_controller import foundry_bp
 
 
@@ -50,6 +51,7 @@ def create_app() -> Flask:
 
     Swagger(app, config=swagger_config, template=swagger_template)
     app.register_blueprint(foundry_bp, url_prefix="/api/foundry")
+    app.register_blueprint(feature_bp, url_prefix="/api/features")
 
     logger.info(
       "Config startup | AZURE_FOUNDRY_ENDPOINT=%s | AZURE_FOUNDRY_MODEL=%s | AZURE_FOUNDRY_KEY_SET=%s",

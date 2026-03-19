@@ -13,6 +13,48 @@ The API will be available at `http://localhost:8000`.
 
 Swagger UI will be available at `http://localhost:8000/apidocs/`.
 
+## Capture Belimo Data To CSV Or JSON
+
+When you are connected to the Raspberry Pi Wi-Fi (`BELIMO-8` in your case), you can collect telemetry directly with Python instead of exporting from the Influx UI:
+
+```bash
+python scripts/collect_belimo_data.py \
+  --output data/belimo_capture.csv \
+  --format csv \
+  --poll-seconds 2 \
+  --duration-seconds 120
+```
+
+JSONL:
+
+```bash
+python scripts/collect_belimo_data.py \
+  --output data/belimo_capture.jsonl \
+  --format jsonl \
+  --poll-seconds 2 \
+  --duration-seconds 120
+```
+
+JSON:
+
+```bash
+python scripts/collect_belimo_data.py \
+  --output data/belimo_capture.json \
+  --format json \
+  --poll-seconds 2 \
+  --duration-seconds 120
+```
+
+The script queries the `measurements` measurement from the Belimo InfluxDB, pivots fields into one row per timestamp, and appends only new rows. By default it stores:
+
+- `feedback_position_%`
+- `setpoint_position_%`
+- `motor_torque_Nmm`
+- `power_W`
+- `internal_temperature_deg_C`
+- `rotation_direction`
+- `test_number`
+
 ## Project Structure
 
 ```text
@@ -33,6 +75,9 @@ backend-starthack/
 | GET    | `/`       | Welcome message      |
 | GET    | `/health` | Health check         |
 | POST   | `/api/foundry/test-llm` | Prueba de modelo LLM (requiere token estático) |
+| POST   | `/api/features/ingest` | Guarda muestras raw/mock, calcula features y actualiza baseline |
+| GET    | `/api/features/devices/<device_id>/latest` | Devuelve las últimas muestras, features y baseline |
+| POST   | `/api/features/seed-demo` | Inserta datos demo para probar el MVP |
 
 ## Auth Flow (Frontend -> Backend)
 
@@ -46,6 +91,18 @@ Envía uno de estos headers:
 Variables de entorno necesarias para auth:
 
 - Ninguna adicional (solo token estático en header)
+
+## MVP Data Layers
+
+El backend ahora separa el pipeline de Alex en cuatro capas persistidas en SQLite:
+
+- `raw_samples`: copia preservada de lecturas reales desde InfluxDB
+- `feature_snapshots`: features calculadas sobre una ventana reciente
+- `baseline_profiles`: perfil normal por dispositivo
+- `mock_samples`: datos sintéticos o alterados para probar anomalías sin tocar los datos raw
+
+Por defecto la base vive en `backend-starthack/data/mvp.db`.
+Puedes cambiarla con `MVP_DB_PATH=/ruta/al/archivo.db`.
 
 ## API Docs
 
