@@ -158,10 +158,15 @@ _SIGNAL_THRESHOLDS: dict[str, float] = {
     "position":    THRESH_POSITION,
 }
 
+# Signal labels for log output — mapped to official Belimo InfluxDB field names:
+#   τ → motor_torque_Nmm      (torque in Nmm)
+#   T → internal_temperature_deg_C  (PCB temperature in °C)
+#   P → power_W               (electrical motor power in W — no pressure field exists on this actuator)
+#   r → feedback_position_%   (shaft position 0–100%)
 _SIGNAL_LABELS: dict[str, str] = {
     "torque":      "τ",
     "temperature": "T",
-    "power":       "P",
+    "power":       "P(W)",   # electrical power, NOT pressure
     "position":    "r",
 }
 
