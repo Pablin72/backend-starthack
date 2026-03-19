@@ -25,7 +25,7 @@ from dotenv import load_dotenv
 
 import paho.mqtt.client as mqtt
 
-from telegram import Update
+from telegram import Update, InlineKeyboardMarkup, InlineKeyboardButton
 from telegram.ext import (
     Application,
     CommandHandler,
@@ -63,10 +63,14 @@ async def is_authorized(update: Update) -> bool:
     """
     If TELEGRAM_CHAT_ID is set in .env, only that chat can use the bot.
     This prevents strangers from accessing your actuator data.
-    (strangers = unauthorized users who find or guess your bot)
     """
-    if CHAT_ID and str(update.effective_chat.id) != str(CHAT_ID):
-        await update.message.reply_text("⛔ Unauthorized access.")
+    chat_id = update.effective_chat.id if update.effective_chat else None
+    
+    if CHAT_ID and str(chat_id) != str(CHAT_ID):
+        if update.callback_query:
+            await update.callback_query.answer("⛔ Unauthorized access.", show_alert=True)
+        elif update.message:
+            await update.message.reply_text("⛔ Unauthorized access.")
         return False
     return True
 
@@ -280,25 +284,46 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await query.answer()
 
     if query.data == "corrective_action":
-        await query.edit_message_text(f"{query.message.text}\n\n⏳ Sending corrective offset to edge gateway ({DEVICE_ID})...")
+        # Step 1: Tell the user what actions are proposed and ask for formal approval
+        # Replace the original alert message's keyboard with an approval keyboard
+        keyboard = [
+            [
+                InlineKeyboardButton("✅ Approve Action", callback_data="approve_action"),
+                InlineKeyboardButton("❌ Cancel", callback_data="cancel_action")
+            ]
+        ]
+        reply_markup = InlineKeyboardMarkup(keyboard)
         
-        # Publish MQTT command to return actuator to a safe setpoint or restart cycle
+        proposed_actions_text = (
+            f"{query.message.text}\n\n"
+            "⚠️ *Proposed Corrective Action:*\n"
+            "1. Override current anomalous trajectory.\n"
+            "2. Send MQTT `set_setpoint` command to fallback position (0.0).\n\n"
+            "Do you approve this execution?"
+        )
+        
+        await query.edit_message_text(
+            text=proposed_actions_text,
+            reply_markup=reply_markup,
+            parse_mode=ParseMode.MARKDOWN
+        )
+
+    elif query.data == "approve_action":
+        # Step 2: The user approved the action, run the actual MQTT publish
+        await query.edit_message_text(f"{query.message.text}\n\n⏳ Executing approved corrective offset to edge gateway ({DEVICE_ID})...")
+        
         client = mqtt.Client(mqtt.CallbackAPIVersion.VERSION2)
         try:
             client.connect(MQTT_HOST, MQTT_PORT, 60)
-            
-            # The edge gateway listens on belimo/{DEVICE_ID}/commands
             topic = f"belimo/{DEVICE_ID}/commands"
             
-            # For demonstration, setting to a "safe" baseline position (0.0 or 50.0)
-            # You can adapt the value based on what your physical logic expects
             payload = json.dumps({"action": "set_setpoint", "value": 0.0})
             
             client.publish(topic, payload)
             client.disconnect()
             
             await query.edit_message_text(
-                text=f"{query.message.text}\n\n✅ *Action Executed!* MQTT command published to setpoint 0.0.",
+                text=f"{query.message.text}\n\n✅ *Action Executed successfully!* MQTT command published to fallback position 0.0.",
                 parse_mode=ParseMode.MARKDOWN
             )
         except Exception as e:
@@ -306,6 +331,12 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await query.edit_message_text(
                 text=f"{query.message.text}\n\n❌ *Error:* Could not reach MQTT broker at {MQTT_HOST}:{MQTT_PORT}."
             )
+            
+    elif query.data == "cancel_action":
+        await query.edit_message_text(
+            text=f"{query.message.text}\n\n🚫 *Action Cancelled.* No commands were sent.",
+            parse_mode=ParseMode.MARKDOWN
+        )
 
     elif query.data == "more_info":
         await query.edit_message_text(
