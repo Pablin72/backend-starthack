@@ -1,0 +1,517 @@
+#!/usr/bin/env python3
+"""
+edge/edge_gateway.py
+────────────────────
+Belimo Smart Actuator — Edge MQTT Gateway
+Runs INDEPENDENTLY of app.py — use its own venv and edge/.env.edge
+
+Architecture:
+  InfluxDB (live) ──► [Poller Thread]
+                            │
+                     [Field Mapper + Delta Engine]
+                            │
+                     [Local Deque Buffer (10 readings)]
+                            │
+              ┌─────────────┴──────────────┐
+              ▼                            ▼
+    MQTT Publish                    HTTP POST to Flask
+    belimo/api/v1/telemetry         /api/features/ingest
+              │
+    MQTT Subscribe
+    belimo/<device>/commands
+
+Usage:
+  cd <repo-root>
+  cp edge/.env.edge.example edge/.env.edge   # fill in MQTT_HOST etc.
+  python -m edge.edge_gateway
+"""
+from __future__ import annotations
+
+import json
+import logging
+import os
+import signal
+import sys
+import threading
+import time
+from collections import deque
+from datetime import UTC, datetime
+from pathlib import Path
+from typing import Any
+
+import requests
+from dotenv import load_dotenv
+from influxdb_client import InfluxDBClient
+
+# ── paho-mqtt v2 compatibility shim ──────────────────────────────────────────
+try:
+    import paho.mqtt.client as mqtt
+    from paho.mqtt.enums import CallbackAPIVersion  # paho >= 2.0
+    _PAHO_V2 = True
+except ImportError:
+    import paho.mqtt.client as mqtt  # type: ignore[no-redef]
+    _PAHO_V2 = False
+
+# ── Bootstrap ─────────────────────────────────────────────────────────────────
+_ENV_PATH = Path(__file__).resolve().parent / ".env.edge"
+load_dotenv(_ENV_PATH)          # edge/.env.edge takes priority
+load_dotenv(override=False)     # fall back to root .env
+
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s [%(levelname)s] %(name)s — %(message)s",
+    datefmt="%H:%M:%S",
+)
+logger = logging.getLogger("edge_gateway")
+
+# ── Config ────────────────────────────────────────────────────────────────────
+MQTT_HOST        = os.getenv("MQTT_HOST", "localhost")
+MQTT_PORT        = int(os.getenv("MQTT_PORT", "1883"))
+MQTT_USERNAME    = os.getenv("MQTT_USERNAME", "")
+MQTT_PASSWORD    = os.getenv("MQTT_PASSWORD", "")
+MQTT_TLS         = os.getenv("MQTT_TLS", "false").lower() == "true"
+
+DEVICE_ID        = os.getenv("DEVICE_ID", "actuator-01")
+TELEMETRY_TOPIC  = "belimo/api/v1/telemetry"
+COMMANDS_TOPIC   = f"belimo/{DEVICE_ID}/commands"
+
+INFLUX_URL       = os.getenv("INFLUX_URL", "http://192.168.3.14:8086")
+INFLUX_TOKEN     = os.getenv("INFLUX_TOKEN", "")
+INFLUX_ORG       = os.getenv("INFLUX_ORG", "belimo")
+INFLUX_BUCKET    = os.getenv("INFLUX_BUCKET", "actuator-data")
+INFLUX_MEAS      = os.getenv("INFLUX_MEASUREMENT", "measurements")
+INFLUX_LOOKBACK  = int(os.getenv("INFLUX_LOOKBACK_SECONDS", "30"))
+
+FLASK_INGEST_URL = os.getenv("FLASK_INGEST_URL", "http://localhost:5000/api/features/ingest")
+FLASK_BASELINE_URL = os.getenv("FLASK_BASELINE_URL", "http://localhost:5000/api/baseline-model/evaluate/combined")
+FLASK_TOKEN      = os.getenv("FLASK_TOKEN", "starthack_front_2026_allow")
+
+POLL_SECONDS     = float(os.getenv("POLL_SECONDS", "2.0"))
+TORQUE_THRESHOLD = float(os.getenv("TORQUE_ANOMALY_THRESHOLD_PCT", "10.0"))
+BUFFER_SIZE      = int(os.getenv("BUFFER_SIZE", "10"))
+
+# ── InfluxDB field names ───────────────────────────────────────────────────────
+INFLUX_FIELDS = [
+    "feedback_position_%",
+    "setpoint_position_%",
+    "motor_torque_Nmm",
+    "power_W",
+    "internal_temperature_deg_C",
+    "rotation_direction",
+]
+
+# ── Shared state ──────────────────────────────────────────────────────────────
+_buffer: deque[dict[str, Any]] = deque(maxlen=BUFFER_SIZE)
+_prev_torque_nm: float | None = None
+_should_stop = threading.Event()
+_mqtt_client: mqtt.Client | None = None
+_mqtt_connected = threading.Event()
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# ── Field Mapper ──────────────────────────────────────────────────────────────
+# ═══════════════════════════════════════════════════════════════════════════════
+
+def _influx_row_to_reading(row: dict[str, Any], timestamp: str) -> dict[str, Any] | None:
+    """Convert one raw InfluxDB pivot row into a normalised reading dict."""
+    try:
+        torque_nmm = float(row.get("motor_torque_Nmm") or 0.0)
+        reading = {
+            "device_id":   DEVICE_ID,
+            "timestamp":   timestamp,
+            # Flask flat schema uses: position, torque, temperature, power, setpoint
+            "position":    float(row.get("feedback_position_%") or 0.0),
+            "setpoint":    float(row.get("setpoint_position_%") or 0.0),
+            "torque":      round(torque_nmm / 1000.0, 6),   # Nmm → Nm scale
+            "temperature": float(row.get("internal_temperature_deg_C") or 0.0),
+            "power":       float(row.get("power_W") or 0.0),
+            # extra metadata kept in-memory but not sent to Flask
+            "_torque_nmm":           torque_nmm,
+            "_rotation_direction":   row.get("rotation_direction"),
+        }
+        return reading
+    except (TypeError, ValueError) as exc:
+        logger.warning("Row mapping failed: %s | row=%s", exc, row)
+        return None
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# ── Local Delta Engine ────────────────────────────────────────────────────────
+# ═══════════════════════════════════════════════════════════════════════════════
+
+def _compute_torque_delta(current_torque_nm: float) -> tuple[float, bool]:
+    """
+    Compare current torque against the previous reading.
+    Returns (delta_pct, anomaly_flag).
+    """
+    global _prev_torque_nm
+    if _prev_torque_nm is None or _prev_torque_nm == 0.0:
+        _prev_torque_nm = current_torque_nm
+        return 0.0, False
+
+    delta_pct = abs((current_torque_nm - _prev_torque_nm) / _prev_torque_nm) * 100.0
+    anomaly = delta_pct > TORQUE_THRESHOLD
+    _prev_torque_nm = current_torque_nm
+
+    if anomaly:
+        logger.warning(
+            "⚠️  TORQUE ANOMALY — delta=%.1f%% (threshold=%.1f%%)", delta_pct, TORQUE_THRESHOLD
+        )
+    return round(delta_pct, 2), anomaly
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# ── MQTT Build Payload ────────────────────────────────────────────────────────
+# ═══════════════════════════════════════════════════════════════════════════════
+
+def _build_mqtt_payload(reading: dict[str, Any], delta_pct: float, anomaly: bool) -> str:
+    """
+    Build the MQTT wire payload (nested envelope format).
+    Topic: belimo/api/v1/telemetry
+    """
+    payload = {
+        "device_id": reading["device_id"],
+        "timestamp": reading["timestamp"],
+        "data": {
+            "torque_signed":  reading["torque"],          # Nm (converted)
+            "temperature_c":  reading["temperature"],
+            "position_pct":   reading["position"],
+            "setpoint_pct":   reading["setpoint"],
+            "power_w":        reading["power"],
+        },
+        "metadata": {
+            "status":           "anomaly" if anomaly else "normal",
+            "torque_delta_pct": delta_pct,
+            "anomaly_flag":     anomaly,
+            "rotation_direction": reading.get("_rotation_direction"),
+        },
+    }
+    return json.dumps(payload, ensure_ascii=True)
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# ── Flask HTTP Bridge ────────────────────────────────────────────────────────
+# ═══════════════════════════════════════════════════════════════════════════════
+
+def _flask_ingest_headers() -> dict[str, str]:
+    return {
+        "Authorization": f"Bearer {FLASK_TOKEN}",
+        "Content-Type":  "application/json",
+    }
+
+
+def _post_to_flask_ingest(reading: dict[str, Any]) -> bool:
+    """POST a single reading to Flask /api/features/ingest. Returns True on success."""
+    body = {
+        "storage_kind": "raw",
+        "source_name":  "edge_mqtt",
+        "sample": {
+            "device_id":   reading["device_id"],
+            "timestamp":   reading["timestamp"],
+            "position":    reading["position"],
+            "torque":      reading["torque"],
+            "temperature": reading["temperature"],
+            "power":       reading["power"],
+            "setpoint":    reading["setpoint"],
+        },
+    }
+    try:
+        resp = requests.post(
+            FLASK_INGEST_URL,
+            json=body,
+            headers=_flask_ingest_headers(),
+            timeout=5,
+        )
+        if resp.status_code == 200:
+            logger.debug("Flask ingest OK | device=%s ts=%s", DEVICE_ID, reading["timestamp"])
+            return True
+        logger.warning("Flask ingest non-200: %s %s", resp.status_code, resp.text[:120])
+        return False
+    except requests.exceptions.ConnectionError:
+        logger.error("Flask unreachable at %s — reading buffered", FLASK_INGEST_URL)
+        return False
+    except requests.exceptions.Timeout:
+        logger.error("Flask ingest timed out — reading buffered")
+        return False
+
+
+def _flush_buffer_to_flask() -> None:
+    """Drain the local buffer by retrying each buffered reading against Flask."""
+    if not _buffer:
+        return
+    logger.info("Flushing %d buffered reading(s) to Flask …", len(_buffer))
+    flushed = 0
+    for _ in range(len(_buffer)):
+        if not _buffer:
+            break
+        reading = _buffer[0]
+        if _post_to_flask_ingest(reading):
+            _buffer.popleft()
+            flushed += 1
+        else:
+            break   # Flask still down — stop trying
+    if flushed:
+        logger.info("Flushed %d reading(s). Buffer remaining: %d", flushed, len(_buffer))
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# ── MQTT Callbacks ────────────────────────────────────────────────────────────
+# ═══════════════════════════════════════════════════════════════════════════════
+
+def _on_connect(client: mqtt.Client, userdata: Any, flags: Any, rc: Any, *args: Any) -> None:
+    if rc == 0 or (hasattr(rc, "value") and rc.value == 0):
+        logger.info("✅ MQTT connected → broker=%s:%s", MQTT_HOST, MQTT_PORT)
+        client.subscribe(COMMANDS_TOPIC, qos=1)
+        logger.info("Subscribed to commands topic: %s", COMMANDS_TOPIC)
+        _mqtt_connected.set()
+        # Drain buffer now that we're reconnected
+        _flush_buffer_to_flask()
+    else:
+        logger.error("MQTT connection refused — rc=%s", rc)
+
+
+def _on_disconnect(client: mqtt.Client, userdata: Any, rc: Any, *args: Any) -> None:
+    _mqtt_connected.clear()
+    logger.warning("MQTT disconnected — rc=%s. Will reconnect automatically.", rc)
+
+
+def _on_message(client: mqtt.Client, userdata: Any, msg: mqtt.MQTTMessage) -> None:
+    try:
+        payload_str = msg.payload.decode("utf-8")
+        command = json.loads(payload_str)
+        logger.info("📥 [CMD] Received command on %s: %s", msg.topic, json.dumps(command))
+        _handle_command(command)
+    except json.JSONDecodeError:
+        logger.warning("[CMD] Non-JSON command received: %s", msg.payload)
+
+
+def _handle_command(command: dict[str, Any]) -> None:
+    """
+    Execute a remote command received via MQTT.
+    Extend this with real actuator control logic.
+    """
+    action = command.get("action", "").lower()
+    if action == "stop":
+        logger.info("[CMD] STOP signal received — edge is flagging for shutdown.")
+        _should_stop.set()
+    elif action == "ping":
+        logger.info("[CMD] PING received — edge is healthy.")
+    elif action == "set_setpoint":
+        value = command.get("value")
+        logger.info("[CMD] SET_SETPOINT → %.1f%%", float(value or 0))
+    else:
+        logger.info("[CMD] Unknown action '%s' — logged and ignored.", action)
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# ── MQTT Client Setup ─────────────────────────────────────────────────────────
+# ═══════════════════════════════════════════════════════════════════════════════
+
+def _build_mqtt_client() -> mqtt.Client:
+    client_id = f"edge_gateway_{DEVICE_ID}"
+
+    if _PAHO_V2:
+        client = mqtt.Client(
+            callback_api_version=CallbackAPIVersion.VERSION2,
+            client_id=client_id,
+        )
+    else:
+        client = mqtt.Client(client_id=client_id)  # type: ignore[call-arg]
+
+    if MQTT_USERNAME:
+        client.username_pw_set(MQTT_USERNAME, MQTT_PASSWORD or None)
+    if MQTT_TLS:
+        client.tls_set()
+
+    client.on_connect    = _on_connect
+    client.on_disconnect = _on_disconnect
+    client.on_message    = _on_message
+
+    # Automatic reconnect: wait 1 s on first retry, up to 60 s
+    client.reconnect_delay_set(min_delay=1, max_delay=60)
+    return client
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# ── InfluxDB Poller ───────────────────────────────────────────────────────────
+# ═══════════════════════════════════════════════════════════════════════════════
+
+def _build_flux_query(start_expr: str) -> str:
+    field_filter = " or ".join(f'r["_field"] == "{f}"' for f in INFLUX_FIELDS)
+    return f"""
+from(bucket: "{INFLUX_BUCKET}")
+  |> range(start: {start_expr})
+  |> filter(fn: (r) => r["_measurement"] == "{INFLUX_MEAS}")
+  |> filter(fn: (r) => {field_filter})
+  |> pivot(rowKey: ["_time"], columnKey: ["_field"], valueColumn: "_value")
+  |> sort(columns: ["_time"])
+"""
+
+
+def _query_influx(
+    influx: InfluxDBClient, start_expr: str
+) -> list[dict[str, Any]]:
+    query_api = influx.query_api()
+    tables = query_api.query(query=_build_flux_query(start_expr), org=INFLUX_ORG)
+    rows = []
+    for table in tables:
+        for record in table.records:
+            values = dict(record.values)
+            ts_raw = values.get("_time")
+            if isinstance(ts_raw, datetime):
+                ts_str = ts_raw.astimezone(UTC).isoformat()
+            else:
+                ts_str = str(ts_raw)
+            row: dict[str, Any] = {"_time_str": ts_str}
+            for field in INFLUX_FIELDS:
+                row[field] = values.get(field)
+            rows.append(row)
+    return rows
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# ── Main Loop ─────────────────────────────────────────────────────────────────
+# ═══════════════════════════════════════════════════════════════════════════════
+
+def _poll_and_publish(influx: InfluxDBClient, client: mqtt.Client) -> None:
+    """
+    Main polling loop.
+    - Queries InfluxDB for new rows since last_seen_timestamp
+    - Maps fields, computes delta, publishes to MQTT, posts to Flask
+    - Buffers readings if Flask is unavailable
+    """
+    last_seen_ts: str | None = None
+
+    logger.info("Edge polling started — device=%s, poll=%.1fs", DEVICE_ID, POLL_SECONDS)
+    logger.info("MQTT telemetry  → %s", TELEMETRY_TOPIC)
+    logger.info("MQTT commands   ← %s", COMMANDS_TOPIC)
+    logger.info("Flask ingest    → %s", FLASK_INGEST_URL)
+
+    while not _should_stop.is_set():
+        loop_start = time.monotonic()
+
+        # ── 1. Build Flux start expression ────────────────────────────────────
+        if last_seen_ts is not None:
+            start_expr = f'time(v: "{last_seen_ts}")'
+        else:
+            start_expr = f"-{INFLUX_LOOKBACK}s"
+
+        # ── 2. Query InfluxDB ──────────────────────────────────────────────────
+        try:
+            rows = _query_influx(influx, start_expr)
+        except Exception as exc:
+            logger.error("InfluxDB query failed: %s", exc)
+            time.sleep(POLL_SECONDS)
+            continue
+
+        # ── 3. Filter already-seen rows ────────────────────────────────────────
+        new_rows = [
+            r for r in rows
+            if last_seen_ts is None or r["_time_str"] > last_seen_ts
+        ]
+
+        if new_rows:
+            logger.info("InfluxDB → %d new row(s)", len(new_rows))
+
+        for row in new_rows:
+            ts = row["_time_str"]
+            last_seen_ts = ts
+
+            # ── 4. Map fields ──────────────────────────────────────────────────
+            reading = _influx_row_to_reading(row, ts)
+            if reading is None:
+                continue
+
+            # ── 5. Local delta / anomaly detection ─────────────────────────────
+            delta_pct, anomaly = _compute_torque_delta(reading["torque"])
+
+            # ── 6. MQTT publish (fire-and-forget, non-blocking) ─────────────────
+            mqtt_payload = _build_mqtt_payload(reading, delta_pct, anomaly)
+            if _mqtt_connected.is_set():
+                result = client.publish(TELEMETRY_TOPIC, mqtt_payload, qos=1)
+                if result.rc == 0:
+                    logger.info(
+                        "📡 MQTT published | pos=%.1f%% torque=%.4fNm Δ=%.1f%% anomaly=%s",
+                        reading["position"], reading["torque"], delta_pct, anomaly,
+                    )
+                else:
+                    logger.warning("MQTT publish failed rc=%s — buffering", result.rc)
+                    _buffer.append(reading)
+            else:
+                logger.warning("MQTT disconnected — buffering reading (buf=%d)", len(_buffer))
+                _buffer.append(reading)
+
+            # ── 7. HTTP POST to Flask ───────────────────────────────────────────
+            if not _post_to_flask_ingest(reading):
+                _buffer.append(reading)
+            else:
+                # If Flask came back online, try to flush buffered readings
+                _flush_buffer_to_flask()
+
+        # ── 8. Sleep remainder of poll interval ────────────────────────────────
+        elapsed = time.monotonic() - loop_start
+        sleep_s = max(0.0, POLL_SECONDS - elapsed)
+        _should_stop.wait(timeout=sleep_s)
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# ── Signal Handler ────────────────────────────────────────────────────────────
+# ═══════════════════════════════════════════════════════════════════════════════
+
+def _handle_signal(signum: int, _frame: Any) -> None:
+    logger.info("Signal %s received — shutting down edge gateway …", signum)
+    _should_stop.set()
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# ── Entry Point ───────────────────────────────────────────────────────────────
+# ═══════════════════════════════════════════════════════════════════════════════
+
+def main() -> int:
+    global _mqtt_client
+
+    signal.signal(signal.SIGINT,  _handle_signal)
+    signal.signal(signal.SIGTERM, _handle_signal)
+
+    logger.info("═══════════════════════════════════════════════")
+    logger.info("  Belimo Edge Gateway — starting up")
+    logger.info("  Device     : %s", DEVICE_ID)
+    logger.info("  Broker     : %s:%s (TLS=%s)", MQTT_HOST, MQTT_PORT, MQTT_TLS)
+    logger.info("  InfluxDB   : %s | bucket=%s", INFLUX_URL, INFLUX_BUCKET)
+    logger.info("  Flask API  : %s", FLASK_INGEST_URL)
+    logger.info("  Buffer     : %d readings max", BUFFER_SIZE)
+    logger.info("  Poll       : %.1fs | Torque Δ threshold=%.1f%%", POLL_SECONDS, TORQUE_THRESHOLD)
+    logger.info("═══════════════════════════════════════════════")
+
+    # ── Build and start MQTT client in background thread ──────────────────────
+    _mqtt_client = _build_mqtt_client()
+    try:
+        _mqtt_client.connect(MQTT_HOST, MQTT_PORT, keepalive=60)
+    except OSError as exc:
+        logger.error("Cannot connect to MQTT broker %s:%s — %s", MQTT_HOST, MQTT_PORT, exc)
+        logger.warning("Continuing in HTTP-only mode (MQTT unavailable)")
+
+    _mqtt_client.loop_start()   # Runs MQTT I/O in a background thread
+
+    # ── Wait for MQTT connection (optional — continue anyway after 5 s) ───────
+    connected = _mqtt_connected.wait(timeout=5.0)
+    if not connected:
+        logger.warning("MQTT broker not reachable yet — will retry in background. Proceeding with polling.")
+
+    # ── Connect to InfluxDB ───────────────────────────────────────────────────
+    influx = InfluxDBClient(url=INFLUX_URL, token=INFLUX_TOKEN, org=INFLUX_ORG, verify_ssl=False)
+
+    try:
+        _poll_and_publish(influx, _mqtt_client)
+    finally:
+        logger.info("Edge gateway shutting down …")
+        influx.close()
+        _mqtt_client.loop_stop()
+        _mqtt_client.disconnect()
+        logger.info("Edge gateway stopped. Goodbye. 👋")
+
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
