@@ -52,28 +52,29 @@ def generate_alert_analysis(evaluation_data: dict) -> str:
         device_id = evaluation_data.get("device_id", "Unknown")
         
         prompt = f"""
-        Actúa como un sistema experto de monitoreo para actuadores industriales (Belimo).
-        Analiza el siguiente reporte de evaluación técnica y genera una notificación de alerta breve y profesional.
+        Act as an expert monitoring system for industrial actuators (Belimo).
+        Analyze the following technical evaluation report and generate a brief and professional alert notification in English.
         
-        Detalles del Dispositivo: {device_id}
-        Estado General: {summary.get("status", "Unknown")}
-        Variable Dominante: {summary.get("dominant_variable", "None")}
-        Insight Principal: {summary.get("insight", "None")}
+        Device Details: {device_id}
+        Overall Status: {summary.get("status", "Unknown")}
+        Dominant Variable: {summary.get("dominant_variable", "None")}
+        Primary Insight: {summary.get("insight", "None")}
         
-        Datos Completos (JSON):
+        Full Data (JSON):
         {json.dumps(evaluation_data, indent=2)}
         
-        Instrucciones de salida:
-        1. Genera un mensaje conciso (máximo 3-4 líneas).
-        2. Indica claramente la severidad.
-        3. Provee una recomendación técnica inmediata.
-        4. Usa un tono de alerta técnica urgente si el estado es 'critical' o 'warning'.
+        Output Instructions:
+        1. Generate a concise message in ENGLISH ONLY (maximum 3-4 lines).
+        2. Use EMOJIS (🚨, ⚠️, 🔧, 📉, etc.) to make the alert visually striking.
+        3. Clearly strongly indicate the severity.
+        4. Provide an immediate technical recommendation.
+        5. Use an urgent technical alert tone if the status is 'critical' or 'warning'.
         """
 
         response = client.chat.completions.create(
             model=model_name,
             messages=[
-                {"role": "system", "content": "Eres un asistente de monitoreo industrial experto."},
+                {"role": "system", "content": "You are an expert industrial monitoring assistant."},
                 {"role": "user", "content": prompt},
             ],
             max_tokens=300,

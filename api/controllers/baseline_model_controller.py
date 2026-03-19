@@ -12,6 +12,7 @@ from api.services.comparison_service import (
     get_model_readiness,
 )
 from api.services.llm_service import generate_alert_analysis
+from api.services.telegram_service import send_telegram_alert
 
 
 baseline_model_bp = Blueprint("baseline_model", __name__)
@@ -192,8 +193,8 @@ def combined_evaluation():
                 print(ai_message)
                 print("==================================================================\n")
                 
-                # TODO: Implement Telegram Bot Trigger here
-                # bot.send_message(chat_id=..., text=ai_message, buttons=...)
+                # Send to Telegram
+                send_telegram_alert(ai_message)
 
             except Exception as e:
                 print(f"Error generating AI alert analysis: {e}")
