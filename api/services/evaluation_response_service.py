@@ -3,10 +3,48 @@ from __future__ import annotations
 from typing import Any
 
 
-def classify_status(*, violation_pct: float, normalized_residual: float) -> str:
-    if violation_pct >= 0.20 or normalized_residual >= 1.50:
+DEFAULT_STATUS_THRESHOLDS = {
+    "critical_violation_pct": 0.20,
+    "warning_violation_pct": 0.05,
+    "critical_normalized_residual": 1.50,
+    "warning_normalized_residual": 0.80,
+}
+
+VARIABLE_STATUS_THRESHOLDS = {
+    # Slow thermal dynamics: require stronger statistical deviation before escalating.
+    "temperature": {
+        "critical_violation_pct": 0.30,
+        "warning_violation_pct": 0.10,
+        "critical_normalized_residual": 1.80,
+        "warning_normalized_residual": 1.00,
+    }
+}
+
+
+def get_status_thresholds(variable_name: str | None = None) -> dict[str, float]:
+    if variable_name is None:
+        return dict(DEFAULT_STATUS_THRESHOLDS)
+    merged = dict(DEFAULT_STATUS_THRESHOLDS)
+    merged.update(VARIABLE_STATUS_THRESHOLDS.get(variable_name, {}))
+    return merged
+
+
+def classify_status(
+    *,
+    violation_pct: float,
+    normalized_residual: float,
+    thresholds: dict[str, float] | None = None,
+) -> str:
+    active = thresholds or DEFAULT_STATUS_THRESHOLDS
+    if (
+        violation_pct >= active["critical_violation_pct"]
+        or normalized_residual >= active["critical_normalized_residual"]
+    ):
         return "critical"
-    if violation_pct >= 0.05 or normalized_residual >= 0.80:
+    if (
+        violation_pct >= active["warning_violation_pct"]
+        or normalized_residual >= active["warning_normalized_residual"]
+    ):
         return "warning"
     return "normal"
 
@@ -18,9 +56,15 @@ def summarize_variable(
     normalized_residual: float,
     trend: str,
     dominant_direction: str | None = None,
+    status: str | None = None,
+    thresholds: dict[str, float] | None = None,
 ) -> str:
-    status = classify_status(violation_pct=violation_pct, normalized_residual=normalized_residual)
-    if status == "normal":
+    resolved_status = status or classify_status(
+        violation_pct=violation_pct,
+        normalized_residual=normalized_residual,
+        thresholds=thresholds,
+    )
+    if resolved_status == "normal":
         if variable_name == "position":
             return "Position response remains within the healthy baseline envelope."
         if variable_name == "torque":

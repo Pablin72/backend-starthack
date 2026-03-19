@@ -110,6 +110,7 @@ THRESH_TORQUE   = float(os.getenv("TORQUE_ANOMALY_THRESHOLD_PCT",    "10.0"))
 THRESH_TEMP     = float(os.getenv("TEMP_ANOMALY_THRESHOLD_PCT",      "5.0"))
 THRESH_POWER    = float(os.getenv("POWER_ANOMALY_THRESHOLD_PCT",     "15.0"))
 THRESH_POSITION = float(os.getenv("POSITION_ANOMALY_THRESHOLD_PCT",  "20.0"))
+TEMP_DELTA_PERSISTENCE = int(os.getenv("TEMP_DELTA_PERSISTENCE", "3"))
 
 # ── InfluxDB field names ───────────────────────────────────────────────────────
 INFLUX_FIELDS = [
@@ -135,6 +136,7 @@ _prev: dict[str, float | None] = {
     "power":       None,
     "position":    None,
 }
+_temp_exceed_streak: int = 0
 
 # Rolling batch for evaluate/combined — keeps last EVAL_BATCH_SIZE readings
 _eval_batch: deque[dict[str, Any]] = deque(maxlen=EVAL_BATCH_SIZE)
@@ -213,16 +215,23 @@ def _compute_all_deltas(reading: dict[str, Any]) -> dict[str, Any]:
     deltas: dict[str, float] = {}
     anomalies: dict[str, bool] = {}
     any_anomaly = False
+    global _temp_exceed_streak
 
     for signal, threshold in _SIGNAL_THRESHOLDS.items():
         current = reading[signal]
         prev    = _prev[signal]
 
         if prev is None or prev == 0.0:
-            d_pct, flag = 0.0, False
+            d_pct, exceeds = 0.0, False
         else:
             d_pct = round(abs((current - prev) / prev) * 100.0, 2)
-            flag  = d_pct > threshold
+            exceeds = d_pct > threshold
+
+        if signal == "temperature":
+            _temp_exceed_streak = (_temp_exceed_streak + 1) if exceeds else 0
+            flag = _temp_exceed_streak >= TEMP_DELTA_PERSISTENCE
+        else:
+            flag = exceeds
 
         deltas[signal]   = d_pct
         anomalies[signal] = flag
@@ -244,6 +253,7 @@ def _compute_all_deltas(reading: dict[str, Any]) -> dict[str, Any]:
         "temperature_delta_pct": deltas["temperature"],
         "power_delta_pct":       deltas["power"],
         "position_delta_pct":    deltas["position"],
+        "temperature_exceed_streak": _temp_exceed_streak,
         # per-signal flags
         "anomalies": anomalies,
         "rotation_direction": reading.get("_rotation_direction"),

@@ -57,6 +57,11 @@ def get_envelope_payload(waveform_type: str | None = None) -> dict[str, Any]:
 
 
 def _build_single_envelope_payload(waveform_type: str, baseline: dict[str, Any], envelope: dict[str, Any]) -> dict[str, Any]:
+    envelope_policy = envelope.get("envelope_policy") or {
+        "position": {"mad_scale": 3.0, "min_floor": 0.1},
+        "torque": {"mad_scale": 3.0, "min_floor": 0.1},
+        "temperature": {"mad_scale": 3.0, "min_floor": 0.1},
+    }
     return {
         "waveform_type": waveform_type,
         "reference_trace": {
@@ -75,7 +80,8 @@ def _build_single_envelope_payload(waveform_type: str, baseline: dict[str, Any],
             "temperature": envelope["temperature_bounds"]["upper"],
         },
         "envelope_metadata": {
-            "construction": "reference trace +/- 3*MAD with minimum spread 0.1",
+            "construction": "reference trace +/- max(mad_scale*MAD, min_floor) per variable",
+            "policy": envelope_policy,
             "position_mad": envelope["position_mad"],
             "torque_mad": envelope["torque_mad"],
             "temperature_mad": envelope["temperature_mad"],

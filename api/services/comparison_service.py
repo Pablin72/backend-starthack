@@ -7,10 +7,20 @@ import pandas as pd
 
 from api.services.baseline_model_service import get_calibration_dir, load_baseline_report
 from api.services.baseline_simulation_service import simulate_from_command_series, simulate_from_waveform
-from api.services.evaluation_response_service import classify_status, summarize_overall, summarize_variable
+from api.services.evaluation_response_service import (
+    classify_status,
+    get_status_thresholds,
+    summarize_overall,
+    summarize_variable,
+)
 
 
 REQUIRED_MIN_SAMPLES = 2
+TEMP_WARNING_MIN_CONSECUTIVE_VIOLATIONS = 3
+TEMP_CRITICAL_MIN_CONSECUTIVE_VIOLATIONS = 6
+TEMP_WARNING_OVERUPPER_MARGIN_C = 0.6
+TEMP_CRITICAL_OVERUPPER_MARGIN_C = 1.5
+TEMP_RUNTIME_MIN_HALF_WIDTH_C = 0.35
 
 
 def evaluate_position(payload: dict[str, Any]) -> dict[str, Any]:
@@ -291,30 +301,60 @@ def evaluate_signal(
     if measured is None:
         return empty_variable_result()
 
+    effective_lower = lower
+    effective_upper = upper
+    if variable_name == "temperature":
+        half_width_floor = np.full_like(expected, TEMP_RUNTIME_MIN_HALF_WIDTH_C, dtype=float)
+        inferred_half_width = (upper - lower) / 2.0
+        effective_half_width = np.maximum(inferred_half_width, half_width_floor)
+        effective_lower = expected - effective_half_width
+        effective_upper = expected + effective_half_width
+
     residual = measured - expected
-    violations = ((measured < lower) | (measured > upper))
+    violations = ((measured < effective_lower) | (measured > effective_upper))
     envelope_violation_pct = float(violations.mean()) if len(violations) else 0.0
-    half_width = np.maximum((upper - lower) / 2.0, 0.1)
+    half_width = np.maximum((effective_upper - effective_lower) / 2.0, 0.1)
     normalized_residual = float(np.median(np.abs(residual) / half_width))
     median_abs_residual = float(np.median(np.abs(residual)))
     rmse = float(np.sqrt(np.mean(np.square(residual))))
     max_abs = float(np.max(np.abs(residual)))
     dominant_direction = infer_dominant_direction(direction_labels, residual)
     trend = infer_residual_trend(residual)
-    status = classify_status(violation_pct=envelope_violation_pct, normalized_residual=normalized_residual)
+    thresholds = get_status_thresholds(variable_name)
+    status = classify_status(
+        violation_pct=envelope_violation_pct,
+        normalized_residual=normalized_residual,
+        thresholds=thresholds,
+    )
+    max_consecutive_violations = max_consecutive_true(violations)
+    persistence_note = None
+
+    if variable_name == "temperature":
+        status, persistence_note = apply_temperature_policy(
+            initial_status=status,
+            measured=measured,
+            upper=effective_upper,
+            envelope_violation_pct=envelope_violation_pct,
+            normalized_residual=normalized_residual,
+            max_consecutive_violations=max_consecutive_violations,
+            thresholds=thresholds,
+        )
+
     insight = summarize_variable(
         variable_name=variable_name,
         violation_pct=envelope_violation_pct,
         normalized_residual=normalized_residual,
         trend=trend,
         dominant_direction=dominant_direction,
+        status=status,
+        thresholds=thresholds,
     )
 
     return {
         "measured": measured,
         "expected": expected,
-        "lower_bound": lower,
-        "upper_bound": upper,
+        "lower_bound": effective_lower,
+        "upper_bound": effective_upper,
         "residual": residual,
         "envelope_violation_flags": violations.tolist(),
         "summary": {
@@ -330,6 +370,9 @@ def evaluate_signal(
             "status": status,
             "insight": insight,
             "direction": dominant_direction,
+            "max_consecutive_violations": int(max_consecutive_violations),
+            "threshold_profile": thresholds,
+            "persistence_note": persistence_note,
         },
     }
 
@@ -447,6 +490,55 @@ def infer_dominant_direction(direction_labels: list[str], residual: np.ndarray) 
 
 def infer_residual_trend(residual: np.ndarray) -> str:
     return "high" if float(np.median(residual)) >= 0 else "low"
+
+
+def max_consecutive_true(mask: np.ndarray) -> int:
+    max_run = 0
+    current = 0
+    for value in mask:
+        if bool(value):
+            current += 1
+            max_run = max(max_run, current)
+        else:
+            current = 0
+    return max_run
+
+
+def apply_temperature_policy(
+    *,
+    initial_status: str,
+    measured: np.ndarray,
+    upper: np.ndarray,
+    envelope_violation_pct: float,
+    normalized_residual: float,
+    max_consecutive_violations: int,
+    thresholds: dict[str, float],
+) -> tuple[str, str | None]:
+    status = initial_status
+    over_upper = measured - upper
+    max_over_upper = float(np.max(over_upper))
+    hot_run = max_consecutive_true(over_upper > TEMP_WARNING_OVERUPPER_MARGIN_C)
+
+    # Guardrail: sustained or severe overheating must still escalate.
+    if max_over_upper >= TEMP_CRITICAL_OVERUPPER_MARGIN_C and hot_run >= TEMP_WARNING_MIN_CONSECUTIVE_VIOLATIONS:
+        return "critical", "Escalated by thermal guardrail (sustained high margin above upper envelope)."
+
+    # Persistence for slow thermal signals: isolated spikes should not trigger alerts.
+    if status == "warning" and max_consecutive_violations < TEMP_WARNING_MIN_CONSECUTIVE_VIOLATIONS:
+        if (
+            envelope_violation_pct < thresholds["critical_violation_pct"]
+            and normalized_residual < thresholds["critical_normalized_residual"]
+            and max_over_upper < TEMP_WARNING_OVERUPPER_MARGIN_C
+        ):
+            status = "normal"
+            return status, "Suppressed short thermal spike (< persistence requirement)."
+
+    if status == "critical" and max_consecutive_violations < TEMP_CRITICAL_MIN_CONSECUTIVE_VIOLATIONS:
+        if max_over_upper < TEMP_CRITICAL_OVERUPPER_MARGIN_C:
+            status = "warning"
+            return status, "Downgraded to warning (critical persistence not reached)."
+
+    return status, None
 
 
 def estimate_alignment_offset(command_values: np.ndarray, measured_position: np.ndarray) -> int:
