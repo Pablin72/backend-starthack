@@ -1,0 +1,8 @@
+# Edge Gateway — standalone requirements
+# Install with: pip install -r requirements_mqtt.txt
+# (in a separate venv from the main backend)
+
+paho-mqtt>=2.0.0
+influxdb-client==1.50.0
+python-dotenv>=1.0.1
+requests>=2.31.0
