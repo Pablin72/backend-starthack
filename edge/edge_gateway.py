@@ -83,7 +83,8 @@ DEVICE_ID        = os.getenv("DEVICE_ID", "actuator-01")
 TELEMETRY_TOPIC  = "belimo/api/v1/telemetry"
 COMMANDS_TOPIC   = f"belimo/{DEVICE_ID}/commands"
 
-INFLUX_URL       = os.getenv("INFLUX_URL", "http://192.168.3.14:8086")
+#INFLUX_URL       = os.getenv("INFLUX_URL", "http://192.168.3.14:8086")
+INFLUX_URL       = os.getenv("INFLUX_URL", "http://192.168.5.14:8086")
 INFLUX_TOKEN     = os.getenv("INFLUX_TOKEN", "")
 INFLUX_ORG       = os.getenv("INFLUX_ORG", "belimo")
 INFLUX_BUCKET    = os.getenv("INFLUX_BUCKET", "actuator-data")

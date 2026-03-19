@@ -146,7 +146,7 @@ def parse_args() -> argparse.Namespace:
         help="Campaign preset to execute",
     )
     parser.add_argument("--device-id", default=DEFAULT_DEVICE_ID, help="Device identifier written into telemetry metadata")
-    parser.add_argument("--poll-seconds", type=float, default=1.0, help="Polling interval for both command and capture scripts")
+    parser.add_argument("--poll-seconds", type=float, default=0.125, help="Polling interval for both command and capture scripts")
     parser.add_argument("--lookback-seconds", type=int, default=2, help="Initial capture lookback")
     parser.add_argument("--output-dir", default="data/campaign", help="Directory for telemetry, command logs, and manifests")
     parser.add_argument("--notes", default="", help="Optional notes appended to every telemetry row")

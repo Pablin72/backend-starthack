@@ -57,7 +57,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--poll-seconds",
         type=float,
-        default=2.0,
+        default=0.125,
         help="How often to poll InfluxDB for new rows",
     )
     parser.add_argument(
