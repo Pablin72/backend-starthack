@@ -18,5 +18,6 @@ COPY data ./data
 # Expose the port the app listens on
 EXPOSE 8000
 
-# Run gunicorn as the production WSGI server
-CMD ["gunicorn", "--bind", "0.0.0.0:8000", "--workers", "2", "app:app"]
+# Run gunicorn as the production WSGI server. 
+# Added threads and timeout to handle slow IO operations (OpenAI & Telegram API calls)
+CMD ["gunicorn", "--bind", "0.0.0.0:8000", "--workers", "2", "--threads", "4", "--timeout", "120", "--access-logfile", "-", "--error-logfile", "-", "app:app"]
