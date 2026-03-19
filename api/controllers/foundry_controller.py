@@ -36,35 +36,35 @@ def test_llm():
     Endpoint de prueba para Azure AI Foundry (LLM)
     ---
     tags:
-        - AI Foundry
+      - AI Foundry
     consumes:
-        - application/json
+      - application/json
     security:
-        - Bearer: []
+      - Bearer: []
     parameters:
-        - in: body
-            name: body
-            required: true
-            schema:
-                type: object
-                properties:
-                    prompt:
-                        type: string
-                        example: "¿Qué es un hackathon?"
+      - in: body
+        name: body
+        required: true
+        schema:
+          type: object
+          properties:
+            prompt:
+              type: string
+              example: "¿Qué es un hackathon?"
     responses:
-        200:
-            description: Respuesta del modelo LLM
-            schema:
-                type: object
-                properties:
-                    response:
-                        type: string
-                        example: "Un hackathon es un evento..."
-                    status:
-                        type: string
-                        example: success
-        400:
-            description: Bad Request si no se envía el 'prompt'
+      200:
+        description: Respuesta del modelo LLM
+        schema:
+          type: object
+          properties:
+            response:
+              type: string
+              example: "Un hackathon es un evento..."
+            status:
+              type: string
+              example: success
+      400:
+        description: Bad Request si no se envía el 'prompt'
     """
 
     data = request.get_json() or {}
