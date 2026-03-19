@@ -87,8 +87,13 @@ FLASK_BASELINE_URL = os.getenv("FLASK_BASELINE_URL", "http://localhost:5000/api/
 FLASK_TOKEN      = os.getenv("FLASK_TOKEN", "starthack_front_2026_allow")
 
 POLL_SECONDS     = float(os.getenv("POLL_SECONDS", "2.0"))
-TORQUE_THRESHOLD = float(os.getenv("TORQUE_ANOMALY_THRESHOLD_PCT", "10.0"))
 BUFFER_SIZE      = int(os.getenv("BUFFER_SIZE", "10"))
+
+# Per-signal anomaly thresholds (% change between consecutive readings)
+THRESH_TORQUE   = float(os.getenv("TORQUE_ANOMALY_THRESHOLD_PCT",    "10.0"))
+THRESH_TEMP     = float(os.getenv("TEMP_ANOMALY_THRESHOLD_PCT",      "5.0"))
+THRESH_POWER    = float(os.getenv("POWER_ANOMALY_THRESHOLD_PCT",     "15.0"))
+THRESH_POSITION = float(os.getenv("POSITION_ANOMALY_THRESHOLD_PCT",  "20.0"))
 
 # ── InfluxDB field names ───────────────────────────────────────────────────────
 INFLUX_FIELDS = [
@@ -102,10 +107,17 @@ INFLUX_FIELDS = [
 
 # ── Shared state ──────────────────────────────────────────────────────────────
 _buffer: deque[dict[str, Any]] = deque(maxlen=BUFFER_SIZE)
-_prev_torque_nm: float | None = None
 _should_stop = threading.Event()
 _mqtt_client: mqtt.Client | None = None
 _mqtt_connected = threading.Event()
+
+# Previous-reading state for all 4 delta signals
+_prev: dict[str, float | None] = {
+    "torque":      None,
+    "temperature": None,
+    "power":       None,
+    "position":    None,
+}
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -136,35 +148,85 @@ def _influx_row_to_reading(row: dict[str, Any], timestamp: str) -> dict[str, Any
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
-# ── Local Delta Engine ────────────────────────────────────────────────────────
+# ── Local Delta Engine  (Torque τ · Temperature T · Power P · Position r) ────
 # ═══════════════════════════════════════════════════════════════════════════════
 
-def _compute_torque_delta(current_torque_nm: float) -> tuple[float, bool]:
-    """
-    Compare current torque against the previous reading.
-    Returns (delta_pct, anomaly_flag).
-    """
-    global _prev_torque_nm
-    if _prev_torque_nm is None or _prev_torque_nm == 0.0:
-        _prev_torque_nm = current_torque_nm
-        return 0.0, False
+_SIGNAL_THRESHOLDS: dict[str, float] = {
+    "torque":      THRESH_TORQUE,
+    "temperature": THRESH_TEMP,
+    "power":       THRESH_POWER,
+    "position":    THRESH_POSITION,
+}
 
-    delta_pct = abs((current_torque_nm - _prev_torque_nm) / _prev_torque_nm) * 100.0
-    anomaly = delta_pct > TORQUE_THRESHOLD
-    _prev_torque_nm = current_torque_nm
+_SIGNAL_LABELS: dict[str, str] = {
+    "torque":      "τ",
+    "temperature": "T",
+    "power":       "P",
+    "position":    "r",
+}
 
-    if anomaly:
-        logger.warning(
-            "⚠️  TORQUE ANOMALY — delta=%.1f%% (threshold=%.1f%%)", delta_pct, TORQUE_THRESHOLD
-        )
-    return round(delta_pct, 2), anomaly
+
+def _delta_pct(current: float, previous: float | None) -> tuple[float, bool, str]:
+    """
+    Compute percentage change between current and previous value.
+    Returns (delta_pct, anomaly_flag, signal_key) — internal helper.
+    """
+    if previous is None or previous == 0.0:
+        return 0.0, False, ""
+    return round(abs((current - previous) / previous) * 100.0, 2), False, ""
+
+
+def _compute_all_deltas(reading: dict[str, Any]) -> dict[str, Any]:
+    """
+    Compute delta_pct and anomaly_flag for all 4 monitored signals.
+    Updates _prev in-place.
+    Returns a metadata dict ready for the MQTT payload.
+    """
+    deltas: dict[str, float] = {}
+    anomalies: dict[str, bool] = {}
+    any_anomaly = False
+
+    for signal, threshold in _SIGNAL_THRESHOLDS.items():
+        current = reading[signal]
+        prev    = _prev[signal]
+
+        if prev is None or prev == 0.0:
+            d_pct, flag = 0.0, False
+        else:
+            d_pct = round(abs((current - prev) / prev) * 100.0, 2)
+            flag  = d_pct > threshold
+
+        deltas[signal]   = d_pct
+        anomalies[signal] = flag
+        _prev[signal]     = current
+
+        if flag:
+            label = _SIGNAL_LABELS[signal]
+            logger.warning(
+                "⚠️  ANOMALY [%s] %s — Δ=%.1f%% (threshold=%.1f%%)",
+                label, signal.upper(), d_pct, threshold,
+            )
+        any_anomaly = any_anomaly or flag
+
+    return {
+        "status":            "anomaly" if any_anomaly else "normal",
+        "anomaly_flag":      any_anomaly,
+        # per-signal deltas
+        "torque_delta_pct":      deltas["torque"],
+        "temperature_delta_pct": deltas["temperature"],
+        "power_delta_pct":       deltas["power"],
+        "position_delta_pct":    deltas["position"],
+        # per-signal flags
+        "anomalies": anomalies,
+        "rotation_direction": reading.get("_rotation_direction"),
+    }
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
 # ── MQTT Build Payload ────────────────────────────────────────────────────────
 # ═══════════════════════════════════════════════════════════════════════════════
 
-def _build_mqtt_payload(reading: dict[str, Any], delta_pct: float, anomaly: bool) -> str:
+def _build_mqtt_payload(reading: dict[str, Any], meta: dict[str, Any]) -> str:
     """
     Build the MQTT wire payload (nested envelope format).
     Topic: belimo/api/v1/telemetry
@@ -173,18 +235,13 @@ def _build_mqtt_payload(reading: dict[str, Any], delta_pct: float, anomaly: bool
         "device_id": reading["device_id"],
         "timestamp": reading["timestamp"],
         "data": {
-            "torque_signed":  reading["torque"],          # Nm (converted)
+            "torque_signed":  reading["torque"],
             "temperature_c":  reading["temperature"],
             "position_pct":   reading["position"],
             "setpoint_pct":   reading["setpoint"],
             "power_w":        reading["power"],
         },
-        "metadata": {
-            "status":           "anomaly" if anomaly else "normal",
-            "torque_delta_pct": delta_pct,
-            "anomaly_flag":     anomaly,
-            "rotation_direction": reading.get("_rotation_direction"),
-        },
+        "metadata": meta,
     }
     return json.dumps(payload, ensure_ascii=True)
 
@@ -422,17 +479,23 @@ def _poll_and_publish(influx: InfluxDBClient, client: mqtt.Client) -> None:
             if reading is None:
                 continue
 
-            # ── 5. Local delta / anomaly detection ─────────────────────────────
-            delta_pct, anomaly = _compute_torque_delta(reading["torque"])
+            # ── 5. Local delta / anomaly detection (τ T P r) ─────────────────
+            meta = _compute_all_deltas(reading)
+            anomaly = meta["anomaly_flag"]
 
             # ── 6. MQTT publish (fire-and-forget, non-blocking) ─────────────────
-            mqtt_payload = _build_mqtt_payload(reading, delta_pct, anomaly)
+            mqtt_payload = _build_mqtt_payload(reading, meta)
             if _mqtt_connected.is_set():
                 result = client.publish(TELEMETRY_TOPIC, mqtt_payload, qos=1)
                 if result.rc == 0:
                     logger.info(
-                        "📡 MQTT published | pos=%.1f%% torque=%.4fNm Δ=%.1f%% anomaly=%s",
-                        reading["position"], reading["torque"], delta_pct, anomaly,
+                        "📡 MQTT | pos=%.1f%% τ=%.4fNm T=%.1f°C P=%.1fW "
+                        "| Δτ=%.1f%% ΔT=%.1f%% ΔP=%.1f%% Δr=%.1f%% anomaly=%s",
+                        reading["position"], reading["torque"],
+                        reading["temperature"], reading["power"],
+                        meta["torque_delta_pct"], meta["temperature_delta_pct"],
+                        meta["power_delta_pct"],  meta["position_delta_pct"],
+                        anomaly,
                     )
                 else:
                     logger.warning("MQTT publish failed rc=%s — buffering", result.rc)
@@ -480,7 +543,10 @@ def main() -> int:
     logger.info("  InfluxDB   : %s | bucket=%s", INFLUX_URL, INFLUX_BUCKET)
     logger.info("  Flask API  : %s", FLASK_INGEST_URL)
     logger.info("  Buffer     : %d readings max", BUFFER_SIZE)
-    logger.info("  Poll       : %.1fs | Torque Δ threshold=%.1f%%", POLL_SECONDS, TORQUE_THRESHOLD)
+    logger.info("  Poll       : %.1fs", POLL_SECONDS)
+    logger.info("  Thresholds : τ=%.0f%% T=%.0f%% P=%.0f%% r=%.0f%%",
+                THRESH_TORQUE, THRESH_TEMP, THRESH_POWER, THRESH_POSITION)
+    logger.info("  Buffer     : %d readings max", BUFFER_SIZE)
     logger.info("═══════════════════════════════════════════════")
 
     # ── Build and start MQTT client in background thread ──────────────────────
