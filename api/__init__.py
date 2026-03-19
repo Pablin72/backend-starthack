@@ -8,7 +8,7 @@ from flasgger import Swagger
 from api.controllers.baseline_model_controller import baseline_model_bp
 from api.controllers.feature_controller import feature_bp
 from api.controllers.foundry_controller import foundry_bp
-
+from api.controllers.telegram_controller import telegram_bp
 
 def create_app() -> Flask:
     load_dotenv()
@@ -54,6 +54,7 @@ def create_app() -> Flask:
     app.register_blueprint(baseline_model_bp, url_prefix="/api/baseline-model")
     app.register_blueprint(foundry_bp, url_prefix="/api/foundry")
     app.register_blueprint(feature_bp, url_prefix="/api/features")
+    app.register_blueprint(telegram_bp, url_prefix="/api/telegram")
     
 
     logger.info(
