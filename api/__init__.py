@@ -3,6 +3,7 @@ import os
 
 from dotenv import load_dotenv
 from flask import Flask, jsonify
+from flask_cors import CORS
 from flasgger import Swagger
 
 from api.controllers.baseline_model_controller import baseline_model_bp
@@ -17,6 +18,7 @@ def create_app() -> Flask:
     logger = logging.getLogger("backend-starthack")
 
     app = Flask(__name__)
+    CORS(app)  # Permite requests de cualquier origen en tu entorno de desarrollo y nube.
 
     swagger_config = {
       "headers": [],

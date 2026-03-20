@@ -21,7 +21,7 @@ When you are connected to the Raspberry Pi Wi-Fi (`BELIMO-8` in your case), you 
 python scripts/collect_belimo_data.py \
   --output data/belimo_capture.csv \
   --format csv \
-  --poll-seconds 2 \
+  --poll-seconds 0.125 \
   --duration-seconds 120
 ```
 
@@ -31,7 +31,7 @@ JSONL:
 python scripts/collect_belimo_data.py \
   --output data/belimo_capture.jsonl \
   --format jsonl \
-  --poll-seconds 2 \
+  --poll-seconds 0.125 \
   --duration-seconds 120
 ```
 
@@ -41,7 +41,7 @@ JSON:
 python scripts/collect_belimo_data.py \
   --output data/belimo_capture.json \
   --format json \
-  --poll-seconds 2 \
+  --poll-seconds 0.125 \
   --duration-seconds 120
 ```
 

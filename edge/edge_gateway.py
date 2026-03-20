@@ -42,8 +42,11 @@ from concurrent.futures import ThreadPoolExecutor
 
 import requests
 from dotenv import load_dotenv
-from influxdb_client import InfluxDBClient, Point
+from influxdb_client import InfluxDBClient, Point, WritePrecision
 from influxdb_client.client.write_api import SYNCHRONOUS
+from datetime import datetime, timezone
+
+COMMAND_TIMESTAMP = datetime.fromtimestamp(0, tz=timezone.utc)
 
 # ── paho-mqtt v2 compatibility shim ──────────────────────────────────────────
 try:
@@ -80,7 +83,8 @@ DEVICE_ID        = os.getenv("DEVICE_ID", "actuator-01")
 TELEMETRY_TOPIC  = "belimo/api/v1/telemetry"
 COMMANDS_TOPIC   = f"belimo/{DEVICE_ID}/commands"
 
-INFLUX_URL       = os.getenv("INFLUX_URL", "http://192.168.3.14:8086")
+#INFLUX_URL       = os.getenv("INFLUX_URL", "http://192.168.3.14:8086")
+INFLUX_URL       = os.getenv("INFLUX_URL", "http://192.168.5.14:8086")
 INFLUX_TOKEN     = os.getenv("INFLUX_TOKEN", "")
 INFLUX_ORG       = os.getenv("INFLUX_ORG", "belimo")
 INFLUX_BUCKET    = os.getenv("INFLUX_BUCKET", "actuator-data")
@@ -111,6 +115,9 @@ THRESH_TEMP     = float(os.getenv("TEMP_ANOMALY_THRESHOLD_PCT",      "5.0"))
 THRESH_POWER    = float(os.getenv("POWER_ANOMALY_THRESHOLD_PCT",     "15.0"))
 THRESH_POSITION = float(os.getenv("POSITION_ANOMALY_THRESHOLD_PCT",  "20.0"))
 TEMP_DELTA_PERSISTENCE = int(os.getenv("TEMP_DELTA_PERSISTENCE", "3"))
+
+if not INFLUX_TOKEN.strip():
+    logger.warning("INFLUX_TOKEN is empty. Check edge/.env.edge; InfluxDB queries will fail with 401.")
 
 # ── InfluxDB field names ───────────────────────────────────────────────────────
 INFLUX_FIELDS = [
@@ -463,9 +470,9 @@ def _handle_command(command: dict[str, Any]) -> None:
             try:
                 # The logger script reads from _process with a fixed epoch timestamp
                 p = Point("_process") \
-                    .field("setpoint_position_%", value) \
+                    .field("setpoint_position_%", float(value)) \
                     .field("test_number", -1) \
-                    .time(0)  # Epoch 0
+                    .time(COMMAND_TIMESTAMP, WritePrecision.MS)
                 _influx_write_api.write(bucket=INFLUX_BUCKET, record=p)
                 logger.info("   ↳ Written to InfluxDB _process measurement successfully.")
             except Exception as exc:

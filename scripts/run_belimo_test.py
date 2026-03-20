@@ -54,7 +54,7 @@ def parse_args() -> argparse.Namespace:
         help="Built-in test suite to run",
     )
     parser.add_argument("--test-number", type=int, required=True, help="Experiment label written to InfluxDB")
-    parser.add_argument("--poll-seconds", type=float, default=1.0, help="Command write interval in seconds")
+    parser.add_argument("--poll-seconds", type=float, default=0.125, help="Command write interval in seconds")
     parser.add_argument("--bias", type=float, default=50.0, help="Center position for single mode")
     parser.add_argument("--amplitude", type=float, default=20.0, help="Amplitude for single mode")
     parser.add_argument("--frequency", type=float, default=0.03, help="Frequency for single mode")
