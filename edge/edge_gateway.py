@@ -115,6 +115,9 @@ THRESH_TEMP     = float(os.getenv("TEMP_ANOMALY_THRESHOLD_PCT",      "5.0"))
 THRESH_POWER    = float(os.getenv("POWER_ANOMALY_THRESHOLD_PCT",     "15.0"))
 THRESH_POSITION = float(os.getenv("POSITION_ANOMALY_THRESHOLD_PCT",  "20.0"))
 TEMP_DELTA_PERSISTENCE = int(os.getenv("TEMP_DELTA_PERSISTENCE", "3"))
+LOCAL_ALERT_COOLDOWN_SECONDS = float(os.getenv("LOCAL_ALERT_COOLDOWN_SECONDS", "45"))
+BASELINE_ALERT_COOLDOWN_SECONDS = float(os.getenv("BASELINE_ALERT_COOLDOWN_SECONDS", "180"))
+BASELINE_ALERT_PERSISTENCE_BATCHES = int(os.getenv("BASELINE_ALERT_PERSISTENCE_BATCHES", "2"))
 
 if not INFLUX_TOKEN.strip():
     logger.warning("INFLUX_TOKEN is empty. Check edge/.env.edge; InfluxDB queries will fail with 401.")
@@ -144,6 +147,10 @@ _prev: dict[str, float | None] = {
     "position":    None,
 }
 _temp_exceed_streak: int = 0
+_alert_last_sent_at: dict[str, float] = {}
+_alert_lock = threading.Lock()
+_baseline_last_status: str | None = None
+_baseline_status_streak: int = 0
 
 # Rolling batch for evaluate/combined — keeps last EVAL_BATCH_SIZE readings
 _eval_batch: deque[dict[str, Any]] = deque(maxlen=EVAL_BATCH_SIZE)
@@ -353,6 +360,7 @@ def _flush_buffer_to_flask() -> None:
 
 def _do_post_eval_batch(telemetry_series: list[dict[str, Any]]) -> None:
     """Background task to POST the eval batch."""
+    global _baseline_last_status, _baseline_status_streak
     body = {
         "device_id":    DEVICE_ID,
         "waveform_type": WAVEFORM_TYPE,
@@ -372,9 +380,27 @@ def _do_post_eval_batch(telemetry_series: list[dict[str, Any]]) -> None:
             status  = summary.get("status", "?")
             insight = summary.get("insight", "")
             logger.info("🧠 BASELINE EVAL [%d samples] → status=%s | %s", len(telemetry_series), status.upper(), insight)
-            if status in ("warning", "anomaly"):
-                logger.warning("⚠️  BASELINE DEVIATION DETECTED: %s", insight)
-                _send_telegram_alert(f"🚨 *ANOMALY (Baseline)* 🚨\n\nDevice: `{DEVICE_ID}`\nStatus: `{status.upper()}`\n\n{insight}")
+            if status in ("warning", "critical"):
+                if status == _baseline_last_status:
+                    _baseline_status_streak += 1
+                else:
+                    _baseline_last_status = status
+                    _baseline_status_streak = 1
+
+                if _baseline_status_streak >= BASELINE_ALERT_PERSISTENCE_BATCHES and _can_send_alert(
+                    f"baseline_{status}", BASELINE_ALERT_COOLDOWN_SECONDS
+                ):
+                    logger.warning("⚠️  BASELINE DEVIATION DETECTED: %s", insight)
+                    alert_message = _build_baseline_alert_message(
+                        status=status,
+                        insight=insight,
+                        evaluation=result,
+                        telemetry_series=telemetry_series,
+                    )
+                    _send_telegram_alert(alert_message)
+            else:
+                _baseline_last_status = status
+                _baseline_status_streak = 0
     except Exception as exc:
         logger.debug("Failed to post eval batch: %s", exc)
 
@@ -392,6 +418,8 @@ def _post_evaluation_batch() -> None:
             "timestamp":    r["timestamp"],
             "torque_signed": r["torque"],
             "temperature_c": r["temperature"],
+            "power_w":       r["power"],
+            "setpoint_position_%": r["setpoint"],
             "position_pct":  r["position"],
             "feedback_position_%": r["position"],
         })
@@ -420,6 +448,63 @@ def _do_telegram_alert(msg: str) -> None:
 def _send_telegram_alert(msg: str) -> None:
     """Queue a telegram alert to the background thread pool."""
     _http_executor.submit(_do_telegram_alert, msg)
+
+
+def _can_send_alert(key: str, cooldown_seconds: float) -> bool:
+    now = time.monotonic()
+    with _alert_lock:
+        last = _alert_last_sent_at.get(key)
+        if last is not None and (now - last) < cooldown_seconds:
+            return False
+        _alert_last_sent_at[key] = now
+        return True
+
+
+def _build_baseline_alert_message(
+    *,
+    status: str,
+    insight: str,
+    evaluation: dict[str, Any],
+    telemetry_series: list[dict[str, Any]],
+) -> str:
+    latest = telemetry_series[-1] if telemetry_series else {}
+    pos = evaluation.get("position", {})
+    tor = evaluation.get("torque", {})
+    tmp = evaluation.get("temperature", {})
+
+    position_actual = float(latest.get("position_pct", latest.get("feedback_position_%", 0.0)) or 0.0)
+    setpoint = float(latest.get("setpoint_position_%", 0.0) or 0.0)
+    tracking_error = round(abs(position_actual - setpoint), 3)
+    torque_now = float(latest.get("torque_signed", 0.0) or 0.0)
+    temp_now = float(latest.get("temperature_c", 0.0) or 0.0)
+    power_now = float(latest.get("power_w", 0.0) or 0.0)
+
+    pos_violation = float(pos.get("envelope_violation_pct", 0.0) or 0.0)
+    tor_violation = float(tor.get("envelope_violation_pct", 0.0) or 0.0)
+    tmp_violation = float(tmp.get("envelope_violation_pct", 0.0) or 0.0)
+
+    pos_norm = float(((pos.get("metrics") or {}).get("normalized_median_abs_residual")) or 0.0)
+    tor_norm = float(((tor.get("metrics") or {}).get("normalized_median_abs_residual")) or 0.0)
+    tmp_norm = float(((tmp.get("metrics") or {}).get("normalized_median_abs_residual")) or 0.0)
+
+    return (
+        f"🚨 *BASELINE ALERT* 🚨\n\n"
+        f"Device: `{DEVICE_ID}`\n"
+        f"Status: `{status.upper()}`\n"
+        f"Insight: {insight}\n\n"
+        f"*Latest sample*\n"
+        f"• Time: `{latest.get('timestamp', '-')}`\n"
+        f"• Setpoint: `{setpoint:.2f}%`\n"
+        f"• Position (actual): `{position_actual:.2f}%`\n"
+        f"• Tracking error: `{tracking_error:.2f}%`\n"
+        f"• Torque: `{torque_now:.4f}`\n"
+        f"• Temperature: `{temp_now:.2f}°C`\n"
+        f"• Power: `{power_now:.2f}W`\n\n"
+        f"*Model diagnostics*\n"
+        f"• Position violation: `{pos_violation:.2f}%` | norm residual `{pos_norm:.3f}`\n"
+        f"• Torque violation: `{tor_violation:.2f}%` | norm residual `{tor_norm:.3f}`\n"
+        f"• Temp violation: `{tmp_violation:.2f}%` | norm residual `{tmp_norm:.3f}`"
+    )
 
 # ═══════════════════════════════════════════════════════════════════════════════
 # ── MQTT Callbacks ────────────────────────────────────────────────────────────
@@ -622,10 +707,16 @@ def _poll_and_publish(influx: InfluxDBClient, client: mqtt.Client) -> None:
                     f"Device: `{DEVICE_ID}`\n"
                     f"Time: `{ts}`\n"
                     f"Values:\n"
-                    f"• Pos: {reading['position']}%\n"
-                    f"• Pwr: {reading['power']}W (Δ {meta['power_delta_pct']}%)"
+                    f"• Setpoint: `{reading['setpoint']:.2f}%`\n"
+                    f"• Position (actual): `{reading['position']:.2f}%`\n"
+                    f"• Tracking error: `{abs(reading['position'] - reading['setpoint']):.2f}%`\n"
+                    f"• Torque: `{reading['torque']:.4f}` (Δ {meta['torque_delta_pct']:.2f}%)\n"
+                    f"• Temperature: `{reading['temperature']:.2f}°C` (Δ {meta['temperature_delta_pct']:.2f}%)\n"
+                    f"• Power: `{reading['power']:.2f}W` (Δ {meta['power_delta_pct']:.2f}%)\n"
+                    f"• Position delta: `{meta['position_delta_pct']:.2f}%`"
                 )
-                _send_telegram_alert(alert_text)
+                if _can_send_alert("local_threshold", LOCAL_ALERT_COOLDOWN_SECONDS):
+                    _send_telegram_alert(alert_text)
 
             # Accumulate for batch ingest
             batch_to_ingest.append(reading)
