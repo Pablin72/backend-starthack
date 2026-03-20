@@ -2,6 +2,17 @@
 
 A Python Flask backend with Docker support, deployed to Azure Container Apps via GitHub Actions.
 
+## Project Overview
+
+This backend powers the Belimo Start Hack 2026 solution for smart actuator monitoring and diagnostics.
+It ingests actuator telemetry, computes features, maintains healthy baselines, and exposes APIs consumed by the frontend dashboard.
+
+## Quick Links
+
+- Frontend repository: https://github.com/Pablin72/frontend-starthack.git
+- Frontend deployed: https://polite-glacier-0bf2d5d03.1.azurestaticapps.net/
+- Backend Swagger: https://starthack-backend.gentlewave-d2939b38.westeurope.azurecontainerapps.io/apidocs/
+
 ## Local Development
 
 ```bash
